@@ -276,6 +276,12 @@ def generate_bank_file(mob_data):
     speed = mob_data.get('agi', '5').strip()
     luck = mob_data.get('luck', '0').strip()
     
+    # AIパラメータ
+    move_speed = mob_data.get('移動速度', '0.23').strip()
+    follow_range = mob_data.get('索敵範囲', '35').strip()
+    kb_resistance = mob_data.get('ノックバック耐性', '0').strip()
+    base_atk = mob_data.get('攻撃力', '3').strip()
+    
     # ボスかどうか判定
     is_boss = 'BOSS' in spawn_tags_raw or 'Boss' in spawn_tags_raw
     
@@ -364,6 +370,13 @@ data modify storage rpg_mob: 物理攻撃力 set value {attack}
 data modify storage rpg_mob: 物理防御力 set value {defense}
 data modify storage rpg_mob: 素早さ set value {speed}
 data modify storage rpg_mob: 運 set value {luck}
+
+# AIパラメータ
+# 移動速度、索敵範囲、ノックバック耐性など
+data modify storage rpg_mob: ai_speed set value {move_speed}
+data modify storage rpg_mob: ai_follow_range set value {follow_range}
+data modify storage rpg_mob: ai_knockback_resistance set value {kb_resistance}
+# data modify storage rpg_mob: ai_attack_damage set value {base_atk} (基本攻撃力: 必要なら使用)
 """
     
     if is_boss:
