@@ -272,6 +272,13 @@ def generate_bank_file(mob_data, index):
             for tag in extra_tags:
                 if tag.lower() not in [area, group, ai, 'boss']: tags.append(tag)
     
+    # 友好フラグの処理
+    is_friendly = mob_data.get('友好', 'FALSE').strip().upper() == 'TRUE'
+    if is_friendly:
+        tags.append("FRIENDLY")
+    else:
+        tags.append("ENEMY")
+    
     tags_str = ','.join(tags)
 
     # -- Bankファイル(register)の中身を作る --
@@ -280,9 +287,20 @@ def generate_bank_file(mob_data, index):
     appearance_parts = []
     if custom_name_raw:
         custom_name_clean = custom_name_raw.replace('""', '"')
-        # CustomName のクォート処理を削除 (ユーザー意向により Compound/JSON そのままにする)
-        # if "CustomName:{" in custom_name_clean and "}'" not in custom_name_clean:
-        #      custom_name_clean = re.sub(r'CustomName:(\{.*\})', r"CustomName:'\1'", custom_name_clean)
+        
+        # "CustomName:" というプレフィックスが入っている場合は削除する
+        # 例: CustomName:{"text":"Name"} -> {"text":"Name"}
+        if custom_name_clean.startswith("CustomName:"):
+             custom_name_clean = custom_name_clean[11:].strip()
+             
+        # Lv表記 (例: Lv.30, Lv 5) を削除する (動的に付与するため)
+        # JSON文字列の中にある {"text":"Lv.30"} や "text":" Lv.30" などをターゲットにする
+        custom_name_clean = re.sub(r'Lv\.?\s*\d+', '', custom_name_clean)
+        
+        # 最後に念のため、BaseNameは常にJSON文字列として扱いたいので
+        # もしリスト形式やオブジェクト形式でなくてもそのままにする（ユーザー入力を信頼）
+        # ただし、誤ったクォート処理をしないように注意
+        
         appearance_parts.append(custom_name_clean)
     
     if appearance_parts:
@@ -333,7 +351,13 @@ def generate_bank_file(mob_data, index):
 data modify storage rpg_mob: "ベース" set value {{id:"{base_entity}",Tags:[{tags_str}]}}
 
 # 見た目
-data modify storage rpg_mob: "見た目" set value {appearance}
+# CustomName は JSON String として BaseNameJSON に保存する (動的レベル表示のため)
+# ここで "見た目" からは除外し、個別の String Tag として保存
+# ユーザー検証: シングルクォート無し (Compound Tag) で保存しても動く
+data modify storage rpg_mob: BaseNameJSON set value {custom_name_clean}
+
+# 見た目 (CustomName以外)
+data modify storage rpg_mob: "見た目" set value {{}}
 
 # 装備 (初期化)
 data modify storage rpg_mob: "見た目".ArmorItems set value [{{}},{{}},{{}},{{}}]
