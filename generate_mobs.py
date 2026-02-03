@@ -253,7 +253,7 @@ def generate_bank_file(mob_data, index):
     
     # -- タグの設定 --
     # 検索・制御用タグ
-    tags = ["MOB", f"mob.{unique_id}", "Init"] # IDタグ変更
+    tags = [f"mob.{unique_id}", "Init"] # IDタグ変更
     
     if is_boss: tags.append("mob.boss")
     
@@ -319,7 +319,7 @@ def generate_bank_file(mob_data, index):
     attack = mob_data.get('str', '5').strip()
     defense = mob_data.get('def', '0').strip()
     speed = mob_data.get('agi', '5').strip()
-    luck = mob_data.get('luck', '0').strip()
+    gold = mob_data.get('gold', '0').strip()
     
     # AIパラメータ
     move_speed_raw = float(mob_data.get('移動速度', '1.0').strip() or '1.0')
@@ -378,7 +378,7 @@ data modify storage rpg_mob: "最大HP" set value {max_hp}
 data modify storage rpg_mob: "物理攻撃力" set value {attack}
 data modify storage rpg_mob: "物理防御力" set value {defense}
 data modify storage rpg_mob: "素早さ" set value {speed}
-data modify storage rpg_mob: "運" set value {luck}
+data modify storage rpg_mob: "ドロップゴールド" set value {gold}
 
 # AIパラメータ
 data modify storage rpg_mob: ai_speed set value {move_speed}
@@ -386,11 +386,8 @@ data modify storage rpg_mob: ai_follow_range set value {follow_range}
 data modify storage rpg_mob: ai_knockback_resistance set value {kb_resistance}
 
 # 召喚 & セットアップ
-# NBTは最低限 (Tags, CustomNameVisible, PersistenceRequired)
-# 見た目やステータスは apply_from_storage で適用される
-summon {base_entity} ~ ~ ~ {{Tags:[{tags_str}], CustomNameVisible:1b, PersistenceRequired:1b}}
-
-execute as @e[tag=mob.{unique_id},tag=Init,distance=..1,limit=1] run function mob:setup/apply_from_storage
+# 召喚は mob:spawn/from_storage 側で実行されるため、ここではデータ定義のみ行う
+# (registerからは summon しない)
 """
     
     if is_boss:
