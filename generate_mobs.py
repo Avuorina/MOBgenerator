@@ -50,9 +50,11 @@ DATAPACK_DIR = SCRIPT_DIR.parent / "MinecraftLikeRPG"
 # BANK_DIR:  ステータスや装備の設定ファイル置き場（Storage用）
 # SPAWN_DIR: コマンドで呼び出すスポーン用ファイル置き場
 # SPAWN_MAP_DIR: 内部処理用のファイル置き場
+# DEBUG_SUMMON_DIR: デバッグ用召喚コマンド置き場
 BANK_DIR = DATAPACK_DIR / "data" / "bank" / "function" / "mob"
 SPAWN_DIR = DATAPACK_DIR / "data" / "mob" / "function" / "spawn"
 SPAWN_MAP_DIR = DATAPACK_DIR / "data" / "mob" / "function" / "spawn_map"
+DEBUG_SUMMON_DIR = DATAPACK_DIR / "data" / "debug" / "function" / "summon"
 
 def fetch_spreadsheet_data():
     """
@@ -84,6 +86,11 @@ def parse_csv_data(csv_data):
     for row in reader:
         # 空行をスキップ（NameJPがない行は無視）
         if not row.get('NameJP') or not row.get('NameJP').strip():
+            continue
+        
+        # 出力列がFALSEの行をスキップ（register生成対象外）
+        output_flag = row.get('出力', 'TRUE').strip().upper()
+        if output_flag == 'FALSE':
             continue
             
         mobs.append(row)
@@ -206,6 +213,104 @@ function mob:spawn_from_storage
     }
 
 
+def generate_debug_summon_file(mob_data, unique_id, bank_path_str):
+    """デバッグ用召喚ファイルを生成"""
+    name_jp = mob_data.get('NameJP', 'Unknown')
+    
+    content = f"""# {name_jp}をデバッグ召喚
+# 使用方法: /function debug:summon/{unique_id}
+
+# 1. データ登録 (Storageにセット)
+function {bank_path_str}
+
+# 2. 汎用召喚 (Storageの内容で召喚)
+function mob:spawn/from_storage
+"""
+    path = DEBUG_SUMMON_DIR / f"{unique_id}.mcfunction"
+    return {
+        'path': path,
+        'content': content,
+        'name': f"{name_jp} (DebugSummon)"
+    }
+
+
+def parse_triggers(mob_data):
+    """
+    トリガー列をパースしてスキルIDを抽出
+    Returns: dict with trigger types as keys and skill IDs as values
+    """
+    triggers = {}
+    
+    # トリガー列のマッピング
+    trigger_columns = {
+        '初期': 'init',
+        '死': 'death',
+        'ダメージ': 'on_hurt',
+        '攻撃': 'on_attack'
+    }
+    
+    for col_name, trigger_type in trigger_columns.items():
+        skill_id = mob_data.get(col_name, '').strip()
+        if skill_id:
+            triggers[trigger_type] = skill_id
+    
+    return triggers
+
+
+def generate_skill_files(mob_data, unique_id, area, group, ai, triggers):
+    """
+    トリガーに応じたスキル実行ファイルを生成
+    Returns: list of file dicts to be written
+    """
+    files = []
+    base_path = BANK_DIR / area / group / ai / unique_id
+    name_jp = mob_data.get('NameJP', 'Unknown')
+    
+    func_base = f"bank:mob/{area}/{group}/{ai}/{unique_id}"
+
+    for trigger_type, skill_json in triggers.items():
+        # 標準のファイル生成 (init.mcfunction, death.mcfunction, etc.)
+        filename = f"{trigger_type}.mcfunction"
+        file_path = base_path / filename
+        
+        # JSONデータをそのまま使用
+        content = f"""# {name_jp} - {trigger_type} trigger
+# Skill: {skill_json}
+
+# スキルデータをストレージに保存
+data modify storage rpg_skill: data set value {skill_json}
+
+# スキル実行
+function skill:execute
+"""
+        files.append({
+            'path': file_path,
+            'content': content,
+            'name': f"{name_jp} ({trigger_type})"
+        })
+
+        # initの場合、Tick実行用ファイル(.mcfunction)も生成して呼び出すようにする
+        if trigger_type == 'init':
+            tick_file_path = base_path / ".mcfunction"
+            tick_content = f"""# {name_jp} - Tick Function
+# Init Check
+execute if entity @s[tag=Init] run function {func_base}/init
+execute if entity @s[tag=Init] run tag @s remove Init
+
+# Other Interval/Turn Skills can be added here
+"""
+            files.append({
+                'path': tick_file_path,
+                'content': tick_content,
+                'name': f"{name_jp} (Tick/InitWrapper)"
+            })
+
+    return files
+
+
+    return files
+
+
 def generate_bank_file(mob_data, index):
     """
     【ステップ3】MOBの設定ファイルを作る（メイン）
@@ -246,10 +351,10 @@ def generate_bank_file(mob_data, index):
     spawn_tags_raw = mob_data.get('スポーンタグ', '').strip()
     is_boss = 'BOSS' in spawn_tags_raw or 'Boss' in spawn_tags_raw
     
-    # 出力先パスの決定 (フラットなIDフォルダ)
-    # bank/mob/001.goblin/register.mcfunction
-    file_path = BANK_DIR / unique_id / "register.mcfunction"
-    bank_path_str = f"bank:mob/{unique_id}/register"
+    # 出力先パスの決定 (階層構造: area/group/ai/id)
+    # bank/mob/global/ground/blow/001.goblin/register.mcfunction
+    file_path = BANK_DIR / area / group / ai / unique_id / "register.mcfunction"
+    bank_path_str = f"bank:mob/{area}/{group}/{ai}/{unique_id}/register"
     
     # -- タグの設定 --
     # 検索・制御用タグ
@@ -285,6 +390,8 @@ def generate_bank_file(mob_data, index):
     
     # 見た目の処理
     appearance_parts = []
+    custom_name_clean = '{"text":""}' # デフォルト値
+    
     if custom_name_raw:
         custom_name_clean = custom_name_raw.replace('""', '"')
         
@@ -397,7 +504,11 @@ data modify storage rpg_mob: ai_knockback_resistance set value {kb_resistance}
         'path': file_path,
         'content': content,
         'mob_id': unique_id,
-        'name': name_jp
+        'name': name_jp,
+        'bank_path': bank_path_str,  # Wrapper生成用に追加
+        'area': area,  # Skill file生成用
+        'group': group,
+        'ai': ai
     }
     
     # Wrapperは生成しない
@@ -454,7 +565,23 @@ def main():
         bank = generate_bank_file(mob, idx)
         if bank:
             all_files.append(bank)
+            
+            # Spawn wrapper は生成しない（debug:summon を使用）
+            # wrapper = generate_spawn_wrapper_file(mob, bank['mob_id'], bank.get('bank_path', f"bank:mob/{bank['mob_id']}/register"))
+            # all_files.append(wrapper)
+            
+            # Debug summon を生成
+            debug_summon = generate_debug_summon_file(mob, bank['mob_id'], bank.get('bank_path', f"bank:mob/{bank['mob_id']}/register"))
+            all_files.append(debug_summon)
+            
+            # Skill files を生成（トリガーがある場合のみ）
+            triggers = parse_triggers(mob)
+            if triggers:
+                skill_files = generate_skill_files(mob, bank['mob_id'], bank['area'], bank['group'], bank['ai'], triggers)
+                all_files.extend(skill_files)
+            
             print(f"   [OK] {bank['name']} ({bank['mob_id']})")
+
     
     # ファイルを書き込み
     write_files(all_files)
