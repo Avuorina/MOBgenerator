@@ -330,21 +330,33 @@ execute if score @s Interval matches ..0 run function {func_base}/turn_distribut
                 
                 for i, t_data in enumerate(turn_data_list):
                     turn_num = i + 1
-                    dist_content += f"execute if score @s Turn matches {turn_num} run function {func_base}/turn/turn_{turn_num}\n"
+                    dist_content += f"execute if score @s Turn matches {turn_num} run return run function {func_base}/turn/turn_{turn_num}\n"
                     
                     # Generate turn_{n}.mcfunction
                     turn_file_content = f"# ターン {turn_num} のアクション\n"
                     
+                    # Probability Check
+                    prob_str = t_data.get('prob', '').strip().replace('%', '')
+                    prob_val = 100
+                    if prob_str and prob_str.isdigit():
+                         prob_val = int(prob_str)
+                    
+                    prefix = ""
+                    if prob_val < 100:
+                        turn_file_content += f"# 発動確率: {prob_val}%\n"
+                        turn_file_content += f"function lib:calc/random100\n"
+                        prefix = f"execute if score $random _ matches ..{prob_val - 1} run "
+
                     # Skill
                     skill_json = t_data.get('skill')
                     if skill_json and skill_json.strip():
-                        turn_file_content += f"data modify storage rpg_skill: data set value {skill_json}\n"
-                        turn_file_content += f"function skill:execute\n"
+                        turn_file_content += f"{prefix}data modify storage rpg_skill: data set value {skill_json}\n"
+                        turn_file_content += f"{prefix}function skill:execute\n"
                     
                     # MP Cost
                     mp_cost = t_data.get('mp')
                     if mp_cost and mp_cost.strip():
-                        turn_file_content += f"scoreboard players remove @s MP {mp_cost}\n"
+                        turn_file_content += f"{prefix}scoreboard players remove @s MP {mp_cost}\n"
                     
                     # Setup Next Turn
                     next_idx = (i + 1) % len(turn_data_list)
@@ -676,6 +688,7 @@ def main():
                 'interval': r.get('Interval'),
                 'skill': r.get('SKILL'),
                 'mp': r.get('-MP'),
+                'prob': r.get('%') or r.get('％') or r.get('Prob') or '',
                 'row_data': r # 必要なら
             }
             if t_data['turn'] or t_data['interval'] or t_data['skill']:
