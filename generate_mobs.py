@@ -83,19 +83,29 @@ def parse_csv_data(csv_data):
     reader = csv.DictReader(csv_data.splitlines())
     mobs = []
     
-    for row in reader:
-        # 空行をスキップ（NameJPがない行は無視）
-        if not row.get('NameJP') or not row.get('NameJP').strip():
-            continue
-        
-        # 出力列がFALSEの行をスキップ（register生成対象外）
-        output_flag = row.get('出力', 'TRUE').strip().upper()
-        if output_flag == 'FALSE':
-            continue
-            
-        mobs.append(row)
+    rows = []
+    last_valid_row = None
     
-    return mobs
+    rows = []
+    last_valid_row = None
+    
+    for row in reader:
+        name = row.get('NameJP', '').strip()
+        
+        # NameJPがある場合
+        if name:
+            rows.append(row)
+            last_valid_row = row
+            
+        # NameJPがないが、前回のMOBが有効で、かつTURN/Interval情報がある場合は継続行とみなす
+        elif last_valid_row and (row.get('TURN') or row.get('Interval') or row.get('SKILL')):
+            # ID情報を継承
+            row['NameJP'] = last_valid_row['NameJP']
+            row['NameUS'] = last_valid_row['NameUS']
+            row['ID'] = last_valid_row.get('ID')
+            rows.append(row)
+            
+    return rows
 
 def snake_case(text):
     """
@@ -254,6 +264,10 @@ def parse_triggers(mob_data):
         if skill_id:
             triggers[trigger_type] = skill_id
     
+    # Turnデータがある場合、initトリガーを強制追加（Tick関数生成のため）
+    if mob_data.get('TURN_DATA_LIST') and 'init' not in triggers:
+        triggers['init'] = ""
+            
     return triggers
 
 
@@ -274,30 +288,95 @@ def generate_skill_files(mob_data, unique_id, area, group, ai, triggers):
         file_path = base_path / filename
         
         # JSONデータをそのまま使用
-        content = f"""# {name_jp} - {trigger_type} trigger
-# Skill: {skill_json}
+        content = f"# {name_jp} - {trigger_type} トリガー\n"
+        if skill_json:
+            content += f"# Skill: {skill_json}\n\n"
+            content += f"# スキルデータをストレージに保存\n"
+            content += f"data modify storage rpg_skill: data set value {skill_json}\n\n"
+            content += f"# スキル実行\n"
+            content += f"function skill:execute\n"
+        else:
+            content += "# このトリガーに特定のスキルはありません（ターン設定のみ）\n"
+        # initの場合、Turn設定を追加（files.appendの前に行う）
+        if trigger_type == 'init':
+            turn_data_list = mob_data.get('TURN_DATA_LIST', [])
+            if turn_data_list:
+                first_interval = turn_data_list[0].get('interval') or '60'
+                content += f"\n# ターン制システムのセットアップ\nscoreboard players set @s Turn 1\nscoreboard players set @s Interval {first_interval}\n"
 
-# スキルデータをストレージに保存
-data modify storage rpg_skill: data set value {skill_json}
-
-# スキル実行
-function skill:execute
-"""
         files.append({
             'path': file_path,
             'content': content,
             'name': f"{name_jp} ({trigger_type})"
         })
 
-        # initの場合、Tick実行用ファイル(.mcfunction)も生成して呼び出すようにする
+        # initの場合、Tick実行用ファイル(.mcfunction)も生成済み
         if trigger_type == 'init':
             tick_file_path = base_path / ".mcfunction"
+            
+            # Turn Dataがあればロジックを追加
+            turn_logic = ""
+            turn_data_list = mob_data.get('TURN_DATA_LIST', [])
+            
+            if turn_data_list:
+                # 2. Tick Logic (Interval Decrement & Branch)
+                turn_logic = f"""
+# ターン制システム
+scoreboard players remove @s Interval 1
+execute if score @s Interval matches ..0 run function {func_base}/turn_distributor
+"""
+                # 3. Turn Distributor & Individual Turn Files
+                dist_content = f"# {name_jp} のターン振り分け\n"
+                
+                for i, t_data in enumerate(turn_data_list):
+                    turn_num = i + 1
+                    dist_content += f"execute if score @s Turn matches {turn_num} run function {func_base}/turn/turn_{turn_num}\n"
+                    
+                    # Generate turn_{n}.mcfunction
+                    turn_file_content = f"# ターン {turn_num} のアクション\n"
+                    
+                    # Skill
+                    skill_json = t_data.get('skill')
+                    if skill_json and skill_json.strip():
+                        turn_file_content += f"data modify storage rpg_skill: data set value {skill_json}\n"
+                        turn_file_content += f"function skill:execute\n"
+                    
+                    # MP Cost
+                    mp_cost = t_data.get('mp')
+                    if mp_cost and mp_cost.strip():
+                        turn_file_content += f"scoreboard players remove @s MP {mp_cost}\n"
+                    
+                    # Setup Next Turn
+                    next_idx = (i + 1) % len(turn_data_list)
+                    next_turn_num = next_idx + 1
+                    next_interval = turn_data_list[next_idx].get('interval') or '20'
+                    
+                    turn_file_content += f"\n# 次のターンのセットアップ\n"
+                    turn_file_content += f"scoreboard players set @s Interval {next_interval}\n"
+                    turn_file_content += f"scoreboard players set @s Turn {next_turn_num}\n"
+                    
+                    files.append({
+                        'path': base_path / "turn" / f"turn_{turn_num}.mcfunction",
+                        'content': turn_file_content,
+                        'name': f"{name_jp} (Turn {turn_num})"
+                    })
+
+                # Loop Guard
+                dist_content += f"execute unless score @s Turn matches 1..{len(turn_data_list)} run scoreboard players set @s Turn 1\n"
+                
+                files.append({
+                    'path': base_path / "turn_distributor.mcfunction",
+                    'content': dist_content,
+                    'name': f"{name_jp} (Turn Distributor)"
+                })
+
             tick_content = f"""# {name_jp} - Tick Function
-# Init Check
+# 初期化チェック
 execute if entity @s[tag=Init] run function {func_base}/init
 execute if entity @s[tag=Init] run tag @s remove Init
 
-# Other Interval/Turn Skills can be added here
+{turn_logic}
+# ここにインターバル/ターン制スキルを追加可能
 """
             files.append({
                 'path': tick_file_path,
@@ -553,16 +632,69 @@ def main():
     
     # CSV データを解析
     print(f"[-] データを解析中...")
-    mobs = parse_csv_data(csv_data)
-    print(f"   {len(mobs)} 個の MOB データを検出")
+    rows = parse_csv_data(csv_data)
+    print(f"   {len(rows)} 行のデータを検出")
     
+    # IDごとにデータをグループ化
+    mob_groups = {} # Key: NameJP, Value: List of rows
+    ordered_names = [] # 出現順を保持
+    
+    for row in rows:
+        name = row.get('NameJP')
+        if name not in mob_groups:
+            mob_groups[name] = []
+            ordered_names.append(name)
+        mob_groups[name].append(row)
+        
+    print(f"   {len(mob_groups)} 種類の MOB を検出")
+
     # ファイルを生成
     print(f"\n[-] ファイルを生成中...")
     all_files = []
     
-    # enumerate でインデックス(1始まり)を取得
-    for idx, mob in enumerate(mobs, 1):
-        bank = generate_bank_file(mob, idx)
+    # グループごとに処理
+    for idx, name in enumerate(ordered_names, 1):
+        group_rows = mob_groups[name]
+        primary_row = group_rows[0] # 1行目をメインデータとする
+        
+        # Outputフラグのチェック (Primary RowがFALSEならスキップ)
+        output_flag = primary_row.get('出力', 'TRUE').strip().upper()
+        if output_flag == 'FALSE':
+            continue
+        
+        # 既存の generate_bank_file 等は 1つの row (mob dict) を受け取る仕様
+        # これを拡張して、group_rows を受け取るようにするか、
+        # あるいは必要な「スキルデータ」だけを抽出して渡すか
+        
+        # ここでは primary_row をベースに、 'TURN_DATA' という新しいフィールドを追加して渡すことにする
+        # generate_mobs.py の他の関数は primary_row の情報（ステータスなど）を使う
+        
+        turn_data = []
+        for r in group_rows:
+            t_data = {
+                'turn': r.get('TURN'),
+                'interval': r.get('Interval'),
+                'skill': r.get('SKILL'),
+                'mp': r.get('-MP'),
+                'row_data': r # 必要なら
+            }
+            if t_data['turn'] or t_data['interval'] or t_data['skill']:
+                turn_data.append(t_data)
+        
+        primary_row['TURN_DATA_LIST'] = turn_data
+        
+        # ID生成ロジック (既存流用)
+        # name_en = primary_row.get('NameUS', 'Unknown')
+        # if not name_en: name_en = 'Unknown'
+        # mob_id_str = snake_case(name_en)
+        # unique_id = f"{idx:03d}.{mob_id_str}"
+        # primary_row['mob_id'] = unique_id # 辞書に注入
+        
+        # NOTE: generate_bank_file 内で mob_id を計算しているので、そこはそのまま任せるか、
+        # あるいはここで計算して渡すか。
+        # 既存: bank = generate_bank_file(mob, idx)
+        
+        bank = generate_bank_file(primary_row, idx)
         if bank:
             all_files.append(bank)
             
@@ -571,13 +703,13 @@ def main():
             # all_files.append(wrapper)
             
             # Debug summon を生成
-            debug_summon = generate_debug_summon_file(mob, bank['mob_id'], bank.get('bank_path', f"bank:mob/{bank['mob_id']}/register"))
+            debug_summon = generate_debug_summon_file(primary_row, bank['mob_id'], bank.get('bank_path', f"bank:mob/{bank['mob_id']}/register"))
             all_files.append(debug_summon)
             
             # Skill files を生成（トリガーがある場合のみ）
-            triggers = parse_triggers(mob)
+            triggers = parse_triggers(primary_row)
             if triggers:
-                skill_files = generate_skill_files(mob, bank['mob_id'], bank['area'], bank['group'], bank['ai'], triggers)
+                skill_files = generate_skill_files(primary_row, bank['mob_id'], bank['area'], bank['group'], bank['ai'], triggers)
                 all_files.extend(skill_files)
             
             print(f"   [OK] {bank['name']} ({bank['mob_id']})")
