@@ -166,57 +166,22 @@ def generate_loot_table_file(row, index):
     simple_id = snake_case(name_us)
     unique_id = f"{idx_str}.{simple_id}"
     
-    base_item = get_col(IDX_BASE).strip() or 'minecraft:wooden_sword'
-    if not base_item.startswith('minecraft:'): base_item = f"minecraft:{base_item}"
-        
-    # Lore & Name Parsing
-    lore_raw = get_col(IDX_LORE).strip()
-    lore_list = []
-    if lore_raw:
-        lines = lore_raw.split('\n')
-        for line in lines:
-            if line:
-                parsed = parse_color_codes(line, default_color="gray", default_italic=False)
-                # 1.20.5+ set_lore needs a list of components, usually ["", {...}, {...}] works best
-                lore_list.append([""] + parsed)
-    
-    name_parsed = parse_color_codes(name_jp, default_color="white", default_italic=False)
-    name_json = [""] + name_parsed
+    # Attributes - REMOVED for Custom System
+    # modifiers are no longer used in set_attributes
 
-    # Attributes
-    modifiers = []
+    # Bonus Stats & Weapon Stats for BankItem
+    custom_stats = {}
+    
+    # Weapon Stats
     weapon_type = get_col(IDX_TYPE).strip().lower()
     is_weapon = weapon_type != "none" and weapon_type != ""
-
-    def add_mod(attr, modifier_id, amount, op="add_value", slot="mainhand"):
-        if amount != 0:
-            modifiers.append({
-                "attribute": attr, # standard loot function field
-                "id": modifier_id, # 1.21 loot function field
-                "amount": amount,
-                "operation": op,
-                "slot": slot
-                # "name" is omitted as requested
-            })
-
-    if is_weapon:
-        # ATK
-        atk_input = safe_float(get_col(IDX_ATK_DMG))
-        if atk_input > 0:
-            # Using specific attribute name requested by user
-            add_mod("minecraft:generic.attack_damage" if "generic" in "minecraft:attack_damage" else "minecraft:attack_damage", 
-                    "minecraft:base_attack_damage", atk_input - 1.0)
-            
-        # Speed
-        spd_input = safe_float(get_col(IDX_ATK_SPD))
-        if spd_input > 0:
-            add_mod("minecraft:generic.attack_speed" if "generic" in "minecraft:attack_speed" else "minecraft:attack_speed",
-                    "minecraft:base_attack_speed", spd_input - 4.0)
-
-    # Bonus Stats
-    custom_stats = {}
+    
+    atk_val = safe_float(get_col(IDX_ATK_DMG))
+    spd_val = safe_float(get_col(IDX_ATK_SPD))
+    
+    # Bonus Stats Map
     bonus_map = {
-        'ATK': IDX_BONUS_ATK, 'HP': IDX_BONUS_HP, 'MP': IDX_BONUS_MP,
+        'HP': IDX_BONUS_HP, 'MP': IDX_BONUS_MP,
         'STR': IDX_BONUS_STR, 'DEF': IDX_BONUS_DEF, 'INT': IDX_BONUS_INT,
         'AGI': IDX_BONUS_AGI, 'LUCK': IDX_BONUS_LUCK
     }
@@ -226,19 +191,40 @@ def generate_loot_table_file(row, index):
             custom_stats[key] = val
 
     # Loot Table Structure
-    # Use standard loot functions as requested
+    # Lore Parsing
+    lore_raw = get_col(IDX_LORE).strip()
+    lore_list = []
+    if lore_raw:
+        lines = lore_raw.split('\n')
+        for line in lines:
+            if line:
+                parsed = parse_color_codes(line, default_color="gray", default_italic=False)
+                # 1.20.5+ set_lore needs a list of components, usually ["", {...}, {...}] works best
+                lore_list.append([""] + parsed)
+
+    # Name Parsing
+    name_parsed = parse_color_codes(name_jp, default_color="white", default_italic=False)
+    name_json = [""] + name_parsed
+
     function_list = []
     
     # 1. Set Components (Custom Data)
+    # BankItem is now a List of Objects
+    bank_item_obj = {
+        "ID": unique_id,
+        "ATK": atk_val,
+        "ATKSpeed": spd_val
+    }
+    # Add bonus stats to the same object or separate?
+    # User example only showed ID, ATK, ATKSpeed.
+    # We will merge custom_stats into it for now to keep data.
+    bank_item_obj.update(custom_stats)
+
     function_list.append({
         "function": "minecraft:set_components",
         "components": {
             "minecraft:custom_data": {
-                "BankItem": {
-                    "ID": unique_id,
-                    "Stats": custom_stats,
-                    "WeaponType": weapon_type if is_weapon else ""
-                }
+                "BankItem": [ bank_item_obj ]
             }
         }
     })
@@ -247,11 +233,20 @@ def generate_loot_table_file(row, index):
     function_list.append({
         "function": "minecraft:set_name",
         "entity": "this",
-        "name": name_json
+        "name": name_json[1] if len(name_json) > 1 else {"text": name_jp, "color": "white"} 
+        # User example used simple object, parse_color_codes returns list. 
+        # We try to use the first parsed component if available, or simple dict.
     })
     
     # 3. Set Lore
     if lore_list:
+        # Simplify Lore to list of strings if possible, or keep component list
+        # User example: ["text"]
+        # Script produces: [["", {"text":...}]]
+        # We will keep script behavior but ensure it works. 
+        # Actually user example used raw string ["これは..."]
+        # We will convert parsed components to simple strings if they are just text for simplicity, 
+        # or just use the parsing result. 
         function_list.append({
             "function": "minecraft:set_lore",
             "entity": "this",
@@ -263,17 +258,12 @@ def generate_loot_table_file(row, index):
     function_list.append({
         "function": "minecraft:set_custom_model_data",
         "floats": {
-            "values": [ float(cmd) ],
+            "values": [ int(cmd) ], # Use INT
             "mode": "replace_all"
         }
     })
     
-    # 5. Set Attributes
-    if modifiers:
-        function_list.append({
-            "function": "minecraft:set_attributes",
-            "modifiers": modifiers
-        })
+    # 5. Set Attributes - REMOVED
 
     loot_table = {
         "pools": [
@@ -282,7 +272,7 @@ def generate_loot_table_file(row, index):
                 "entries": [
                     {
                         "type": "minecraft:item",
-                        "name": base_item,
+                        "name": "minecraft:carrot_on_a_stick", # Fixed Base Item
                         "functions": function_list
                     }
                 ]
