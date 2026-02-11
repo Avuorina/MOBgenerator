@@ -33,17 +33,16 @@ IDX_NAME_US = 2
 IDX_LORE = 3
 IDX_BASE = 4
 IDX_TYPE = 5
-IDX_ATK_DMG = 6
-IDX_ATK_SPD = 7
+IDX_ATK_DMG = 5
+IDX_ATK_SPD = 6
 
-IDX_BONUS_ATK = 8
-IDX_BONUS_HP = 9
-IDX_BONUS_MP = 10
-IDX_BONUS_STR = 11
-IDX_BONUS_DEF = 12
-IDX_BONUS_INT = 13
-IDX_BONUS_AGI = 14
-IDX_BONUS_LUCK = 15
+IDX_BONUS_HP = 7
+IDX_BONUS_MP = 8
+IDX_BONUS_STR = 9
+IDX_BONUS_DEF = 10
+IDX_BONUS_INT = 11
+IDX_BONUS_AGI = 12
+IDX_BONUS_LUCK = 13
 
 def fetch_spreadsheet_data():
     print(f"[-] スプレッドシートからデータを取得中...")
@@ -173,7 +172,17 @@ def generate_loot_table_file(row, index):
     custom_stats = {}
     
     # Weapon Stats
-    weapon_type = get_col(IDX_TYPE).strip().lower()
+    weapon_type_raw = get_col(IDX_TYPE).strip().lower()
+    
+    # Mapping for numeric types (if used)
+    weapon_type_map = {
+        "1": "spear",
+        "4": "sword",
+        "7": "axe"
+    }
+    
+    weapon_type = weapon_type_map.get(weapon_type_raw, weapon_type_raw)
+    
     is_weapon = weapon_type != "none" and weapon_type != ""
     
     atk_val = safe_float(get_col(IDX_ATK_DMG))
@@ -213,7 +222,8 @@ def generate_loot_table_file(row, index):
     bank_item_obj = {
         "ID": unique_id,
         "ATK": atk_val,
-        "ATKSpeed": spd_val
+        "ATKSpeed": spd_val,
+        "WeaponType": weapon_type
     }
     # Add bonus stats to the same object or separate?
     # User example only showed ID, ATK, ATKSpeed.
@@ -239,31 +249,77 @@ def generate_loot_table_file(row, index):
     })
     
     # 3. Set Lore
+    final_lore = []
+    
+    # Custom Description (from Spreadsheet)
     if lore_list:
-        # Simplify Lore to list of strings if possible, or keep component list
-        # User example: ["text"]
-        # Script produces: [["", {"text":...}]]
-        # We will keep script behavior but ensure it works. 
-        # Actually user example used raw string ["これは..."]
-        # We will convert parsed components to simple strings if they are just text for simplicity, 
-        # or just use the parsing result. 
+        final_lore.extend(lore_list)
+        final_lore.append([""]) # Spacer
+        
+    # Stats Display
+    # リーチ(攻撃範囲)のマッピング
+    reach_map = {
+        "sword": 3.0,
+        "axe": 2.5,
+        "spear": 7.5
+    }
+    reach_val = reach_map.get(weapon_type, 2.0)
+    
+    # 攻撃力 & 攻撃速度
+    if atk_val > 0:
+        final_lore.append([
+            "",
+            {"text": "__U_E005__ ", "color": "white", "italic": False},
+            {"text": f"{atk_val:.1f}", "color": "red", "italic": False}
+        ])
+    
+    if spd_val > 0:
+        final_lore.append([
+            "",
+            {"text": "__U_E00B__ ", "color": "white", "italic": False},
+            {"text": f"{spd_val:.1f}", "color": "blue", "italic": False}
+        ])
+        
+    # ボーナスステータス
+    # フォーマット: {"HP": {"color": "red", "label": "__U_E001__"}, ...}
+    stat_display_config = {
+        "HP": {"color": "red", "label": "__U_E001__"},
+        "MP": {"color": "aqua", "label": "__U_E003__"},
+        "STR": {"color": "dark_red", "label": "__U_E007__"},
+        "DEF": {"color": "blue", "label": "__U_E006__"},
+        "INT": {"color": "light_purple", "label": "__U_E008__"},
+        "AGI": {"color": "green", "label": "__U_E009__"},
+        "LUCK": {"color": "yellow", "label": "__U_E00A__"}
+    }
+    
+    for stat_key, stat_val in custom_stats.items():
+        if stat_val != 0:
+            conf = stat_display_config.get(stat_key, {"color": "white", "label": stat_key})
+            sign = "+" if stat_val > 0 else ""
+            final_lore.append([
+                "",
+                {"text": f"{conf['label']} ", "color": "white", "italic": False},
+                {"text": f"{sign}{stat_val:.1f}", "color": conf["color"], "italic": False}
+            ])
+
+    if final_lore:
         function_list.append({
             "function": "minecraft:set_lore",
             "entity": "this",
-            "lore": lore_list,
+            "lore": final_lore,
             "mode": "append"
         })
         
-    # 4. Set Custom Model Data
+    # 4. Custom Model Data の設定
     function_list.append({
         "function": "minecraft:set_custom_model_data",
         "floats": {
-            "values": [ int(cmd) ], # Use INT
+            "values": [ int(cmd) ], # INT型を使用
             "mode": "replace_all"
         }
     })
     
-    # 5. Set Attributes - REMOVED
+    # 5. Attributes 設定 - 削除済み
 
     loot_table = {
         "pools": [
@@ -272,7 +328,7 @@ def generate_loot_table_file(row, index):
                 "entries": [
                     {
                         "type": "minecraft:item",
-                        "name": "minecraft:carrot_on_a_stick", # Fixed Base Item
+                        "name": "minecraft:carrot_on_a_stick", # ベースアイテム固定
                         "functions": function_list
                     }
                 ]
@@ -281,6 +337,17 @@ def generate_loot_table_file(row, index):
     }
 
     content = json.dumps(loot_table, indent=2, ensure_ascii=False)
+    
+    # アイコンの手動Unicodeエスケープ処理
+    # プレースホルダーをリテラルのエスケープシーケンスに置換
+    # __U_XXXX__ -> \uXXXX
+    import re
+    def replace_unicode_placeholder(match):
+        code = match.group(1)
+        return f"\\u{code}"
+        
+    content = re.sub(r"__U_([0-9A-F]{4})__", replace_unicode_placeholder, content)
+    
     file_path = ITEM_LOOT_DIR / f"{unique_id}.json"
     
     return {'path': file_path, 'content': content, 'name': name_jp}
