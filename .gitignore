@@ -22,3 +22,5 @@ Thumbs.db
 # Project specific
 *.csv
 *.backup
+credentials.json
+*.txt

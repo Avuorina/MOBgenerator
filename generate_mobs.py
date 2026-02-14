@@ -24,6 +24,15 @@ import urllib.request
 from pathlib import Path
 import json
 import re
+import time
+
+try:
+    import gspread
+    from oauth2client.service_account import ServiceAccountCredentials
+    HAS_GSPREAD = True
+except ImportError:
+    HAS_GSPREAD = False
+    print("Warning: gspread or oauth2client not installed. Skipping spreadsheet update.")
 
 # ==========================================
 # 設定エリア
@@ -264,23 +273,30 @@ def parse_triggers(mob_data):
         if skill_id:
             triggers[trigger_type] = skill_id
     
-    # Turnデータがある場合、initトリガーを強制追加（Tick関数生成のため）
-    if mob_data.get('TURN_DATA_LIST') and 'init' not in triggers:
+    # initトリガーは常に必要（Tick関数生成のため）
+    # Initタグの処理を行う .mcfunction (Tick) はここで生成されるため、
+    # スキルやターン設定がなくても必ず生成する必要がある。
+    if 'init' not in triggers:
         triggers['init'] = ""
             
     return triggers
 
 
-def generate_skill_files(mob_data, unique_id, area, group, ai, triggers):
+def generate_skill_files(mob_data, unique_id, area, group, ai, triggers, subfolder_id=None):
     """
     トリガーに応じたスキル実行ファイルを生成
+    subfolder_id: サブフォルダID（例: "main", "008.henchman"）
     Returns: list of file dicts to be written
     """
     files = []
-    base_path = BANK_DIR / area / group / ai / unique_id
+    # サブフォルダがある場合はパスに含める
+    if subfolder_id:
+        base_path = BANK_DIR / area / group / ai / unique_id / subfolder_id
+        func_base = f"bank:mob/{area}/{group}/{ai}/{unique_id}/{subfolder_id}"
+    else:
+        base_path = BANK_DIR / area / group / ai / unique_id
+        func_base = f"bank:mob/{area}/{group}/{ai}/{unique_id}"
     name_jp = mob_data.get('NameJP', 'Unknown')
-    
-    func_base = f"bank:mob/{area}/{group}/{ai}/{unique_id}"
 
     for trigger_type, skill_json in triggers.items():
         # 標準のファイル生成 (init.mcfunction, death.mcfunction, etc.)
@@ -402,13 +418,15 @@ execute if entity @s[tag=Init] run tag @s remove Init
     return files
 
 
-def generate_bank_file(mob_data, index):
+def generate_bank_file(mob_data, index, name_us_to_id):
     """
     【ステップ3】MOBの設定ファイルを作る（メイン）
     1体のMOBデータを受け取って、以下の2つのファイルの中身を作ります。
     
     1. Registerファイル: データ登録用 (bank/mob/xxx/register.mcfunction)
     2. Wrapperファイル: コマンド呼び出し用 (mob/spawn/xxx.mcfunction)
+    
+    name_us_to_id: NameUS → unique_id マッピング辞書（サブフォルダ対応用）
     """
     
     # 必須フィールド（名前など）がない場合は作らない
@@ -428,9 +446,26 @@ def generate_bank_file(mob_data, index):
     custom_name_raw = mob_data.get('ベース', '').strip()
     equipment_raw = mob_data.get('見た目', '').strip()
     
-    # IDの生成 (001.snake_case_name)
+    # IDの生成 (NameUSベース)
     simple_id = snake_case(name_us)
-    unique_id = f"{index:03d}.{simple_id}"
+    
+    # NameUSが初出なら新規ID、既出なら既存IDを使用
+    if name_us not in name_us_to_id:
+        name_us_to_id[name_us] = f"{index:03d}.{simple_id}"
+    unique_id = name_us_to_id[name_us]
+    
+    # サブフォルダ処理
+    subfolder = mob_data.get('サブフォルダ', '').strip()
+    if subfolder:
+        subfolder_snake = snake_case(subfolder)
+        # "Main" の場合は連番を付けない（特別扱い）
+        if subfolder.lower() == 'main':
+            subfolder_id = subfolder_snake
+        else:
+            # Main以外は連番を付ける
+            subfolder_id = f"{index:03d}.{subfolder_snake}"
+    else:
+        subfolder_id = None
     
     # カテゴリ情報（タグとしては残すが、フォルダ分けには使わない）
     area = mob_data.get('エリア', 'global').strip().lower()
@@ -442,16 +477,27 @@ def generate_bank_file(mob_data, index):
     spawn_tags_raw = mob_data.get('スポーンタグ', '').strip()
     is_boss = 'BOSS' in spawn_tags_raw or 'Boss' in spawn_tags_raw
     
-    # 出力先パスの決定 (階層構造: area/group/ai/id)
-    # bank/mob/global/ground/blow/001.goblin/register.mcfunction
-    file_path = BANK_DIR / area / group / ai / unique_id / "register.mcfunction"
-    bank_path_str = f"bank:mob/{area}/{group}/{ai}/{unique_id}/register"
+    # 出力先パスの決定 (階層構造: area/group/ai/id[/subfolder])
+    if subfolder_id:
+        # サブフォルダあり: bank/mob/global/debug/shoot/007.test_summoner/008.henchman/register.mcfunction
+        file_path = BANK_DIR / area / group / ai / unique_id / subfolder_id / "register.mcfunction"
+        bank_path_str = f"bank:mob/{area}/{group}/{ai}/{unique_id}/{subfolder_id}/register"
+        bank_dir_for_wrapper = BANK_DIR / area / group / ai / unique_id / subfolder_id
+    else:
+        # サブフォルダなし: bank/mob/global/ground/blow/001.goblin/register.mcfunction
+        file_path = BANK_DIR / area / group / ai / unique_id / "register.mcfunction"
+        bank_path_str = f"bank:mob/{area}/{group}/{ai}/{unique_id}/register"
+        bank_dir_for_wrapper = BANK_DIR / area / group / ai / unique_id
     
     # -- タグの設定 --
     # 検索・制御用タグ
     tags = [f"mob.{unique_id}", "Init"] # IDタグ変更
     
     if is_boss: tags.append("mob.boss")
+    
+    # サブフォルダがある場合、そのサブフォルダIDもタグとして追加（Dispatcherで識別するため）
+    if subfolder_id:
+        tags.append(f"mob.{subfolder_id}")
     
     tags.append(area.capitalize())
     tags.append(group.capitalize())
@@ -460,9 +506,11 @@ def generate_bank_file(mob_data, index):
     if spawn_tags_raw:
         if 'Tags:[' in spawn_tags_raw:
             spawn_tags_content = spawn_tags_raw.split('Tags:[')[1].split(']')[0]
-            extra_tags = [t.strip() for t in spawn_tags_content.split(',') if t.strip()]
+            extra_tags = [t.strip().strip('"').strip("'") for t in spawn_tags_content.split(',') if t.strip()]
             for tag in extra_tags:
-                if tag.lower() not in [area, group, ai, 'boss']: tags.append(tag)
+                # クォートを除去済みのタグと比較
+                if tag.lower() not in [area, group, ai, 'boss']: 
+                    tags.append(tag)
         else:
             extra_tags = [t.strip() for t in spawn_tags_raw.split(',') if t.strip()]
             for tag in extra_tags:
@@ -475,7 +523,9 @@ def generate_bank_file(mob_data, index):
     else:
         tags.append("ENEMY")
     
-    tags_str = ','.join(tags)
+    # 以前は tags_str = ','.join(tags) でクォートなしだった
+    # SNBTの互換性のため、すべてのタグをダブルクォートで囲むように変更する
+    tags_str = ','.join([f'"{t}"' for t in tags])
 
     # -- Bankファイル(register)の中身を作る --
     
@@ -542,59 +592,53 @@ def generate_bank_file(mob_data, index):
 # ID: {unique_id}
 # {bank_path_str}
 
-# [Spawn Egg Command]
-# give @p {spawn_egg_id}[entity_data={{id:"minecraft:armor_stand",NoGravity:1b,Invisible:1b,Tags:["mob.egg_spawn"],equipment:{{head:{{id:"minecraft:stone",count:1,components:{{"minecraft:custom_data":{{"RPGMobId":"{unique_id}"}}}}}}}}}},item_name={{"text":"{name_jp} Spawn Egg","color":"gold"}}] 1
+# 初期化
+data modify storage rpg_mob: Instant set value {{}}
 
-# ベースエンティティ (summonに使うのでStorageへのベース保存は不要だが、参照用に残しても良い)
-data modify storage rpg_mob: "ベース" set value {{id:"{base_entity}",Tags:[{tags_str}]}}
+# Summon用データ
+data modify storage rpg_mob: Instant.Base set value {{id:"{base_entity}",Tags:[{tags_str}]}}
+data modify storage rpg_mob: Instant.Costume set value {{equipment:{{feet:{armor_items[0]},legs:{armor_items[1]},chest:{armor_items[2]},head:{armor_items[3]},mainhand:{hand_items[0]},offhand:{hand_items[1]}}}}}
 
-# 見た目
-# CustomName は JSON String として BaseNameJSON に保存する (動的レベル表示のため)
-# ここで "見た目" からは除外し、個別の String Tag として保存
-# ユーザー検証: シングルクォート無し (Compound Tag) で保存しても動く
-data modify storage rpg_mob: BaseNameJSON set value {custom_name_clean}
+# 見た目 (CustomName)
+# CustomName は JSON String として BaseNameJSON に保存する (動的レベル表示のため) -> Baseに含まれるTagsやCustomNameは上記のInstant.Baseで設定済み
+# ユーザーの例では CustomName:'...' となっていた。
+data modify storage rpg_mob: Instant.Base.CustomName set value '{custom_name_clean}'
 
-# 見た目 (CustomName以外)
-data modify storage rpg_mob: "見た目" set value {{}}
+# 即時ステータス
+data modify storage rpg_mob: Instant.EyePower set value {follow_range}d
+data modify storage rpg_mob: Instant.MovementPower set value {move_speed}d
+data modify storage rpg_mob: Instant.KBResistance set value {kb_resistance}d
+data modify storage rpg_mob: Instant.KBPower set value 0d
 
-# 装備 (初期化)
-data modify storage rpg_mob: "見た目".ArmorItems set value [{{}},{{}},{{}},{{}}]
-data modify storage rpg_mob: "見た目".HandItems set value [{{}},{{}}]
+# カスタムステータス (Delay)
+data modify storage rpg_mob: Delay.Status.Level set value {level}
+data modify storage rpg_mob: Delay.Status.HPMax set value {max_hp}f
+data modify storage rpg_mob: Delay.Status.MPMax set value 0
+data modify storage rpg_mob: Delay.Status.ATK set value {attack}
+data modify storage rpg_mob: Delay.Status.DEF set value {defense}
+data modify storage rpg_mob: Delay.Status.SPD set value {speed}
+data modify storage rpg_mob: Delay.Status.GOLD set value {gold}
 
-# 装備 (個別設定)
-data modify storage rpg_mob: "見た目".ArmorItems[0] merge value {armor_items[0]}
-data modify storage rpg_mob: "見た目".ArmorItems[1] merge value {armor_items[1]}
-data modify storage rpg_mob: "見た目".ArmorItems[2] merge value {armor_items[2]}
-data modify storage rpg_mob: "見た目".ArmorItems[3] merge value {armor_items[3]}
-
-data modify storage rpg_mob: "見た目".HandItems[0] merge value {hand_items[0]}
-data modify storage rpg_mob: "見た目".HandItems[1] merge value {hand_items[1]}
-
-# ステータス
-data modify storage rpg_mob: "レベル" set value {level}
-data modify storage rpg_mob: "最大HP" set value {max_hp}
-data modify storage rpg_mob: "物理攻撃力" set value {attack}
-data modify storage rpg_mob: "物理防御力" set value {defense}
-data modify storage rpg_mob: "素早さ" set value {speed}
-data modify storage rpg_mob: "ドロップゴールド" set value {gold}
-
-# AIパラメータ
-data modify storage rpg_mob: ai_speed set value {move_speed}
-data modify storage rpg_mob: ai_follow_range set value {follow_range}
-data modify storage rpg_mob: ai_knockback_resistance set value {kb_resistance}
-
-# 召喚 & セットアップ
-# 召喚は mob:spawn/from_storage 側で実行されるため、ここではデータ定義のみ行う
-# (registerからは summon しない)
+# Skill ai
+data modify storage rpg_mob: Delay.AI set value {{}}
 """
     
+    if ai_raw and ai_raw != 'blow' and ai_raw != 'boss':
+         # AIカラムにJSONなどが入っている場合、それを Delay.AI に入れる
+         # ユーザーの要望: AIの感じにskillを入力すればいい -> Delay.AIに設定
+         if ai_raw.startswith('{'):
+             content += f"\n# AI (Custom)\ndata modify storage rpg_mob: Delay.AI set value {ai_raw}\n"
+         else:
+             content += f"\n# AI (Type)\n# Type: {ai_raw}\n"
+    
     if is_boss:
-        content += "\n# ボスフラグ\ndata modify storage rpg_mob: ボス set value true\n"
+        content += "\n# ボスフラグ\ndata modify storage rpg_mob: Instant.Base.Tags append value \"Boss\"\n"
     
     bank_file = {
         'path': file_path,
         'content': content,
         'mob_id': unique_id,
+        'subfolder_id': subfolder_id,  # サブフォルダID追加
         'name': name_jp,
         'bank_path': bank_path_str,  # Wrapper生成用に追加
         'area': area,  # Skill file生成用
@@ -602,9 +646,205 @@ data modify storage rpg_mob: ai_knockback_resistance set value {kb_resistance}
         'ai': ai
     }
     
-    # Wrapperは生成しない
-    
     return bank_file
+
+
+def generate_dispatch_files(all_mobs_data):
+    """
+    【ステップ4】ディスパッチファイル群を作る (GitHub構造準拠)
+    - ディレクトリの中に .mcfunction を作成
+    - 呼び出しは execute ... run function .../ で終わる
+    - タグによる分岐:
+        - Bank/Group/AI: Capitalized Tag (Global, Debug, etc.)
+        - Mob Root: mob.unique_id
+        - Subfolder: mob.subfolder_id
+    """
+    files = []
+    
+    # dispatch_tree["global"]["debug"]["shoot"]["007..."]["main"] = {__mob__: ...}
+    dispatch_tree = {}
+    
+    for mob in all_mobs_data:
+        if 'bank_path' not in mob:
+            continue
+            
+        full_path = mob['bank_path'] 
+        # bank:mob/global/debug/shoot/007.test_summoner/008.henchman/register
+        # rel_path: global/debug/shoot/007.test_summoner/008.henchman
+        rel_path = full_path.replace("bank:mob/", "").replace("/register", "")
+        
+        parts = rel_path.split("/")
+        
+        current_node = dispatch_tree
+        for part in parts:
+            if part not in current_node:
+                current_node[part] = {}
+            current_node = current_node[part]
+        
+        # 葉ノード (subfolder or mob root without subfolder)
+        # ここは「そのフォルダ自体」がMobのコンテナであることを示す
+        # しかし実装上は、generate_skill_files がそのフォルダ内に .mcfunction (Tick) を作っている
+        current_node['__mob__'] = mob
+
+    # 再帰的にファイルを生成
+    root_lines, sub_files = generate_dispatch_code_recursive(dispatch_tree, "")
+    
+    files.extend(sub_files)
+    
+    # ルートファイル (data/bank/function/mob/.mcfunction)
+    # これは function bank:mob/ で呼ばれる
+    root_file_path = BANK_DIR.parent / "mob" / ".mcfunction"
+    
+    files.append({
+        'path': root_file_path,
+        'content': "\n".join(root_lines),
+        'name': "Dispatch: Root (bank/function/mob/.mcfunction)"
+    })
+    
+    return files
+
+
+def generate_dispatcher_file(all_mobs_data):
+    """
+    【ステップ5】Dispatcherファイルを作る (Tag -> Path Mapping)
+    - data/mob/function/spawn/match_id.mcfunction
+    - execute if entity @s[tag=mob.id] run function ...
+    """
+    # 目的: .../data/mob/function/spawn/match_id.mcfunction
+    dispatcher_path = BANK_DIR.parent.parent.parent / "mob" / "function" / "spawn" / "match_id.mcfunction"
+    
+    lines = [
+        "# Tag-based Dispatcher",
+        "# Generated by generate_mobs.py",
+        "",
+        "# マーカー(@s)のタグを見て、対応するRegister関数を呼び出す"
+    ]
+    
+    for mob in all_mobs_data:
+        mob_id = mob.get('mob_id')
+        bank_path = mob.get('bank_path') # bank:mob/area/group/ai/id/register
+        subfolder_id = mob.get('subfolder_id')
+        
+        if not mob_id or not bank_path:
+            continue
+            
+        # 親ID (007.test_summoner)
+        # サブフォルダがある場合、'main' であるときだけ親IDでも呼べるようにする
+        if not subfolder_id or subfolder_id.lower() == 'main':
+             lines.append(f"execute if entity @s[tag=mob.{mob_id}] run function {bank_path}")
+        
+        # サブフォルダID (008.henchman or main)
+        if subfolder_id:
+             lines.append(f"execute if entity @s[tag=mob.{subfolder_id}] run function {bank_path}")
+             
+    return {
+        'path': dispatcher_path,
+        'content': "\n".join(lines),
+        'name': "System: Mob Dispatcher (match_id.mcfunction)"
+    }
+
+
+def generate_dispatch_code_recursive(node, relative_path=""):
+    """
+    再帰的にディスパッチコード(行リスト)とファイル定義を生成するヘルパー
+    """
+    lines = []
+    generated_files = []
+    
+    sub_keys = [k for k in node.keys() if k != '__mob__']
+    
+    # 1. 子ディレクトリへの分岐
+    for key in sub_keys:
+        # 子ノードのパス
+        child_rel = f"{relative_path}/{key}" if relative_path else key
+        
+        # 子functionへのパス (末尾スラッシュ必須)
+        # bank:mob/global/debug/shoot/
+        if relative_path == "":
+             child_func_ref = f"bank:mob/{key}/"
+        else:
+             child_func_ref = f"bank:mob/{relative_path}/{key}/"
+             
+        # タグの推論
+        # 基本: Capitalized (Global, Debug, Shoot)
+        # 例外: mob.* (007.test_summoner, main, 008.henchman)
+        
+        # keyが数字を含むか、ドットを含む場合は Mob系タグとみなす (簡易判定)
+        # または、子ノード自身が '__mob__' を持っていれば Mob系
+        # しかし subfolder (main) は '__mob__' を持つが数字を含まないこともある
+        
+        # より確実な方法: node[key] に '__mob__' があるか？
+        child_node = node[key]
+        tag_condition = ""
+        
+        if '__mob__' in child_node:
+            # そのフォルダ自体がMOBのLeafフォルダ、またはSubfolder
+            mob_data = child_node['__mob__']
+            
+            # Subfolderかどうか判定
+            # pathの末尾と key が一致するか？
+            # mob['subfolder_id'] == key なら subfolder
+            
+            if mob_data.get('subfolder_id') == key:
+                tag_condition = f"mob.{key}" # subfolder tag (mob.main, mob.008.henchman)
+            elif mob_data.get('mob_id') == key:
+                # Root Mob Path (007.test_summoner)
+                tag_condition = f"mob.{key}"
+            else:
+                 # fallback
+                 tag_condition = key.capitalize()
+        else:
+            # 中間ディレクトリ (Global, Debug, Shoot ...)
+            tag_condition = key.capitalize()
+            
+        lines.append(f"execute if entity @s[tag={tag_condition}] run function {child_func_ref}")
+        
+        # 子ファイルの生成
+        child_lines, child_files = generate_dispatch_code_recursive(node[key], child_rel)
+        
+        # 子ファイル定義を追加
+        generated_files.extend(child_files)
+        
+        # ディレクトリ内 .mcfunction を作成
+        # path: data/bank/function/mob/global/.mcfunction
+        
+        # 【修正】child_linesが空の場合（＝葉ノード＝Mob単体フォルダの場合）は
+        # Dispatcherファイルを生成しない。
+        # そこには generate_skill_files が生成した Tick/Init 用のファイルがあるため。
+        # 上書きしてしまうと Tick が動かなくなる。
+        if child_lines:
+            f_path_rel = f"{child_rel}/.mcfunction"
+            f_full = BANK_DIR / f_path_rel.replace("/", "\\") # Windows path separator safe
+            
+            generated_files.append({
+                'path': f_full,
+                'content': "\n".join(child_lines),
+                'name': f"Dispatch: {child_rel}/.mcfunction"
+            })
+        
+    # 2. 自分自身がLeafの場合 (Skill fileの生成した .mcfunction を呼ぶ必要はない)
+    # なぜなら function bank:mob/.../ で呼ばれた時点で、そのフォルダの .mcfunction が実行されるから。
+    # ここで生成しているのは「そのフォルダの .mcfunction」の中身そのもの。
+    # もし自分自身がMob Leafなら、init/tickのロジックは generate_skill_files 側で生成される ".mcfunction" に書かれている。
+    
+    # ここでの衝突に注意:
+    # generate_skill_files も ".mcfunction" を生成する (Tick/InitWrapper)。
+    # generate_dispatch_files も ".mcfunction" を生成する (Dispatcher)。
+    
+    # Mob Leafフォルダ (例: .../008.henchman/) の場合:
+    # generate_skill_files が既に .mcfunction (Init呼び出しなど) を生成している。
+    # generate_dispatch_files がそれを上書きすると、Tickロジックが消える！
+    
+    # 解決策:
+    # generate_dispatch_files は「サブディレクトリがある場合」のみ .mcfunction を生成すべき。
+    # Leafノード (その下にフォルダがない) に対してはファイルを生成しない（generate_skill_filesに任せる）。
+    
+    if not sub_keys:
+        # Leafノード: 生成しない (files リストに追加しない)
+        pass 
+        return [], generated_files # linesは空、filesは子供たちが作ったものだけ
+        
+    return lines, generated_files
 
 
 def write_files(files):
@@ -637,6 +877,13 @@ def main():
     print("Minecraft RPG - MOB Generator")
     print("=" * 60)
     
+    # 既存のbank/function/mob/*を削除（古いファイルをクリーンアップ）
+    if BANK_DIR.exists():
+        import shutil
+        print(f"\n[-] 既存のMOBデータを削除中: {BANK_DIR}")
+        shutil.rmtree(BANK_DIR)
+        print(f"   [OK] 削除完了")
+    
     # スプレッドシートからデータを取得
     csv_data = fetch_spreadsheet_data()
     if not csv_data:
@@ -645,6 +892,12 @@ def main():
     # CSV データを解析
     print(f"[-] データを解析中...")
     rows = parse_csv_data(csv_data)
+    
+    # 元のスプレッドシート上の行番号を保持 (Header=1行目ならData=2行目~)
+    # parse_csv_dataがリストを返すので、イテレーション順序は維持されている
+    for i, r in enumerate(rows):
+        r['_original_index'] = i + 2 # ヘッダー(1行) + 0-index(1) = 2行目スタート
+        
     print(f"   {len(rows)} 行のデータを検出")
     
     # IDごとにデータをグループ化
@@ -663,7 +916,13 @@ def main():
     # ファイルを生成
     print(f"\n[-] ファイルを生成中...")
     all_files = []
+    name_us_to_id = {}  # NameUS → unique_id マッピング（サブフォルダ対応）
     
+    # IDリスト出力用 (RowIndex -> DisplayID)
+    id_export_map = {}
+    
+    bank_info_list = []
+
     # グループごとに処理
     for idx, name in enumerate(ordered_names, 1):
         group_rows = mob_groups[name]
@@ -707,30 +966,149 @@ def main():
         # あるいはここで計算して渡すか。
         # 既存: bank = generate_bank_file(mob, idx)
         
-        bank = generate_bank_file(primary_row, idx)
+        bank = generate_bank_file(primary_row, idx, name_us_to_id)
         if bank:
             all_files.append(bank)
+            bank_info_list.append(bank)
+            
+            # IDエクスポート用データを記録 (Primary Row)
+            display_id = bank['mob_id']
+            if bank.get('subfolder_id'):
+                # サブフォルダがある場合、サブフォルダIDを表示
+                # Mainの場合(subfolder_id="main")でも "007.test_summoner" (親ID) を表示するか？
+                # ユーザー要望: "007.test_summoner" (Main), "008.henchman" (Henchman)
+                # subfolder_idが数字で始まる("")008...")ならそちらを優先、
+                # そうでなければ親IDを表示
+                sf = bank['subfolder_id']
+                if sf[0].isdigit():
+                     display_id = sf
+            
+            id_export_map[primary_row['_original_index']] = display_id
             
             # Spawn wrapper は生成しない（debug:summon を使用）
             # wrapper = generate_spawn_wrapper_file(mob, bank['mob_id'], bank.get('bank_path', f"bank:mob/{bank['mob_id']}/register"))
             # all_files.append(wrapper)
             
             # Debug summon を生成
-            debug_summon = generate_debug_summon_file(primary_row, bank['mob_id'], bank.get('bank_path', f"bank:mob/{bank['mob_id']}/register"))
+            # サブフォルダがある場合、
+            # 1. Main なら 親ID (007.test_summoner) で生成
+            # 2. その他 なら サブフォルダID (008.henchman) で生成
+            
+            debug_summon_id = bank['mob_id']
+            if bank.get('subfolder_id'):
+                sf = bank['subfolder_id']
+                if sf.lower() == 'main':
+                    # Main は親IDで生成 (007.test_summoner.mcfunction)
+                    debug_summon_id = bank['mob_id']
+                else:
+                    # 他はサブフォルダIDで生成 (008.henchman.mcfunction)
+                    debug_summon_id = sf
+            
+            debug_summon = generate_debug_summon_file(primary_row, debug_summon_id, bank.get('bank_path', f"bank:mob/{bank['mob_id']}/register"))
             all_files.append(debug_summon)
             
             # Skill files を生成（トリガーがある場合のみ）
             triggers = parse_triggers(primary_row)
             if triggers:
-                skill_files = generate_skill_files(primary_row, bank['mob_id'], bank['area'], bank['group'], bank['ai'], triggers)
+                skill_files = generate_skill_files(
+                    primary_row, 
+                    bank['mob_id'], 
+                    bank['area'], 
+                    bank['group'], 
+                    bank['ai'], 
+                    triggers,
+                    bank.get('subfolder_id')  # サブフォルダID追加
+                )
                 all_files.extend(skill_files)
             
             print(f"   [OK] {bank['name']} ({bank['mob_id']})")
 
     
     # ファイルを書き込み
+    # Dispatch files (復元)
+    print("[-] Generating dispatch files...")
+    dispatch_files = generate_dispatch_files(bank_info_list)
+    all_files.extend(dispatch_files)
+    
+    # ID Matcher file (New)
+    print("[-] Generating matcher file...")
+    matcher_file = generate_dispatcher_file(bank_info_list)
+    all_files.append(matcher_file)
+    
     write_files(all_files)
     
+    # IDリストファイル生成
+    id_list_path = SCRIPT_DIR / "id_list_updates.txt"
+    print(f"\n[-] IDリストを生成中: {id_list_path}")
+    
+    with open(id_list_path, 'w', encoding='utf-8') as f:
+        # 全行分出力（ヘッダーを除く行数分）
+        max_row = len(rows) + 1 # 2行目から開始
+        for r_idx in range(2, max_row + 2): # python rangeはmax未満まで
+             # マップにあればID、なければ空文字
+             val = id_export_map.get(r_idx, "")
+             f.write(f"{val}\n")
+             
+             f.write(f"{val}\n")
+             
+    print(f"   [OK] 生成完了。")
+
+    # Google Sheets API で書き込み
+    if HAS_GSPREAD:
+        try:
+            # 認証情報の確認
+            creds_file = SCRIPT_DIR / "credentials.json" # デフォルト
+            if not creds_file.exists():
+                # ユーザー指定のファイル名を探す
+                import glob
+                json_files = glob.glob(str(SCRIPT_DIR / "*.json"))
+                for jf in json_files:
+                    if "mob-generator" in jf and "credentials" not in jf: # credentials.json以外でそれっぽいもの
+                        creds_file = Path(jf)
+                        break
+                # もし credentials.json があればそれを優先
+                if (SCRIPT_DIR / "credentials.json").exists():
+                    creds_file = SCRIPT_DIR / "credentials.json"
+            
+            if creds_file.exists():
+                print(f"\n[-] Google Sheets API で書き込み中... ({creds_file.name})")
+                
+                scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+                creds = ServiceAccountCredentials.from_json_keyfile_name(str(creds_file), scope)
+                client = gspread.authorize(creds)
+                
+                # シートを開く
+                sheet = client.open_by_key(SPREADSHEET_ID).get_worksheet(int(SHEET_GID))
+                
+                # 書き込み用データの整形（リストのリスト）
+                # M2セルから開始 (row_index 2 ~ max_row + 2)
+                cell_list = []
+                # 行数は rows の数 + 1 (Header) だけある
+                # rows変数は parse_csv_data の結果 (Headerを含まないデータ行のみ)
+                # rowsのインデックスは 0 から始まるが、スプレッドシートは 2行目からデータ開始
+                
+                # データの行数分ループ
+                for r_idx in range(2, len(rows) + 2 + 1): # 余裕を持って少し多めに
+                    val = id_export_map.get(r_idx, "")
+                    cell_list.append([val])
+                
+                # 一括更新 (M列 = 13列目)
+                # update range: M2:M<last_row>
+                end_row = 2 + len(cell_list) - 1
+                sheet.update(range_name=f'M2:M{end_row}', values=cell_list)
+                
+                print(f"   [OK] スプレッドシートのM列を更新しました！")
+            else:
+                print(f"\n[!] 認証ファイル(credentials.json)が見つからないため、API更新をスキップしました")
+        except Exception as e:
+            import traceback
+            print(f"\n[!] Google Sheets API Error:")
+            traceback.print_exc()
+            print(f"    手動で id_list_updates.txt の内容をM列に貼り付けてください")
+    else:
+        print(f"\n[!] gspreadライブラリがないため、自動更新をスキップしました")
+        print(f"    pip install gspread oauth2client を実行してください")
+
     print("\n" + "=" * 60)
     print(f"output (Bank): {BANK_DIR}")
     # print(f"output (Spawn): {SPAWN_DIR}")
