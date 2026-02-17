@@ -256,14 +256,17 @@ def generate_debug_summon_file(mob_data, unique_id, bank_path_str):
     """デバッグ用召喚ファイルを生成"""
     name_jp = mob_data.get('NameJP', 'Unknown')
     
+    # IDから数字部分のみを抽出 (例: "001.goblin" -> "001")
+    numeric_id = unique_id.split('.')[0] if '.' in unique_id else unique_id
+    
     content = f"""# {name_jp}をデバッグ召喚
 # 使用方法: /function debug:summon/{unique_id}
 
-# 1. データ登録 (Storageにセット)
-function {bank_path_str}
+# IDをStorageにセット
+data modify storage api: Argument.ID set value "{numeric_id}"
 
-# 2. 汎用召喚 (Storageの内容で召喚)
-function mob:spawn/from_storage
+# API経由で召喚
+function api:mob/summon
 """
     path = DEBUG_SUMMON_DIR / f"{unique_id}.mcfunction"
     return {
@@ -271,6 +274,69 @@ function mob:spawn/from_storage
         'content': content,
         'name': f"{name_jp} (DebugSummon)"
     }
+
+
+def generate_summon_file(mob_data, unique_id, base_entity):
+    """summon/.mcfunctionを生成 (bank/mob/unique_id/summon/.mcfunction)"""
+    name_jp = mob_data.get('NameJP', 'Unknown')
+    
+    # summonファイル用ディレクトリパス
+    summon_dir = BANK_DIR / unique_id / "summon"
+    
+    content = f"""#> bank:mob/{unique_id}/summon/
+#
+# {name_jp} 召喚処理
+#
+# @within bank:mob/alias/{unique_id.split('.')[0]}/summon
+
+# エンティティ召喚
+summon {base_entity.replace('minecraft:', '')} ~ ~ ~ {{Tags:[Init]}}
+"""
+    
+    return {
+        'path': summon_dir / ".mcfunction",
+        'content': content,
+        'name': f"{name_jp} (Summon)"
+    }
+
+
+def generate_alias_files(mob_data, unique_id, bank_path_str):
+    """alias構造を生成 (bank/function/mob/alias/001/register.mcfunction など)"""
+    name_jp = mob_data.get('NameJP', 'Unknown')
+    
+    # IDから数字部分のみを抽出 (例: "001.goblin" -> "001")
+    numeric_id = unique_id.split('.')[0] if '.' in unique_id else unique_id
+    
+    # alias用ディレクトリパス
+    alias_dir = BANK_DIR / "alias" / numeric_id
+    
+    files = []
+    
+    # 1. register.mcfunction - 元のregisterを呼ぶだけ
+    register_content = f"""#> bank:mob/alias/{numeric_id}/register
+# @within bank_manager:mob/summon/register
+
+function {bank_path_str}
+"""
+    files.append({
+        'path': alias_dir / "register.mcfunction",
+        'content': register_content,
+        'name': f"{name_jp} (Alias Register)"
+    })
+    
+    # 2. summon.mcfunction - bank:mob/unique_id/summon/を呼ぶ
+    summon_content = f"""#> bank:mob/alias/{numeric_id}/summon
+# @within bank_manager:mob/trigger/summon/macro
+
+function bank:mob/{unique_id}/summon/
+"""
+    files.append({
+        'path': alias_dir / "summon.mcfunction",
+        'content': summon_content,
+        'name': f"{name_jp} (Alias Summon)"
+    })
+    
+    return files
 
 
 def parse_triggers(mob_data):
@@ -309,13 +375,13 @@ def generate_skill_files(mob_data, unique_id, area, group, ai, triggers, subfold
     Returns: list of file dicts to be written
     """
     files = []
-    # サブフォルダがある場合はパスに含める
+    # サブフォルダがある場合はパスに含める（フラット構造）
     if subfolder_id:
-        base_path = BANK_DIR / area / group / ai / unique_id / subfolder_id
-        func_base = f"bank:mob/{area}/{group}/{ai}/{unique_id}/{subfolder_id}"
+        base_path = BANK_DIR / unique_id / subfolder_id
+        func_base = f"bank:mob/{unique_id}/{subfolder_id}"
     else:
-        base_path = BANK_DIR / area / group / ai / unique_id
-        func_base = f"bank:mob/{area}/{group}/{ai}/{unique_id}"
+        base_path = BANK_DIR / unique_id
+        func_base = f"bank:mob/{unique_id}"
     name_jp = mob_data.get('NameJP', 'Unknown')
 
     for trigger_type, skill_json in triggers.items():
@@ -487,7 +553,7 @@ def generate_bank_file(mob_data, index, name_us_to_id):
     else:
         subfolder_id = None
     
-    # カテゴリ情報（タグとしては残すが、フォルダ分けには使わない）
+    # カテゴリ情報（参考用のみ、フォルダ構造には使わない）
     area = mob_data.get('エリア', 'global').strip().lower()
     group = mob_data.get('グループ', 'ground').strip().lower()
     ai_raw = mob_data.get('AI', 'blow').strip().lower()
@@ -497,44 +563,44 @@ def generate_bank_file(mob_data, index, name_us_to_id):
     spawn_tags_raw = mob_data.get('スポーンタグ', '').strip()
     is_boss = 'BOSS' in spawn_tags_raw or 'Boss' in spawn_tags_raw
     
-    # 出力先パスの決定 (階層構造: area/group/ai/id[/subfolder])
+    # 出力先パスの決定 (フラット構造: mob/unique_id[/subfolder])
     if subfolder_id:
-        # サブフォルダあり: bank/mob/global/debug/shoot/007.test_summoner/008.henchman/register.mcfunction
-        file_path = BANK_DIR / area / group / ai / unique_id / subfolder_id / "register.mcfunction"
-        bank_path_str = f"bank:mob/{area}/{group}/{ai}/{unique_id}/{subfolder_id}/register"
-        bank_dir_for_wrapper = BANK_DIR / area / group / ai / unique_id / subfolder_id
+        # サブフォルダあり: bank/mob/007.test_summoner/008.henchman/register.mcfunction
+        file_path = BANK_DIR / unique_id / subfolder_id / "register.mcfunction"
+        bank_path_str = f"bank:mob/{unique_id}/{subfolder_id}/register"
+        bank_dir_for_wrapper = BANK_DIR / unique_id / subfolder_id
     else:
-        # サブフォルダなし: bank/mob/global/ground/blow/001.goblin/register.mcfunction
-        file_path = BANK_DIR / area / group / ai / unique_id / "register.mcfunction"
-        bank_path_str = f"bank:mob/{area}/{group}/{ai}/{unique_id}/register"
-        bank_dir_for_wrapper = BANK_DIR / area / group / ai / unique_id
+        # サブフォルダなし: bank/mob/001.goblin/register.mcfunction
+        file_path = BANK_DIR / unique_id / "register.mcfunction"
+        bank_path_str = f"bank:mob/{unique_id}/register"
+        bank_dir_for_wrapper = BANK_DIR / unique_id
     
-    # -- タグの設定 --
-    # 検索・制御用タグ
-    tags = [f"mob.{unique_id}", "Init"] # IDタグ変更
+    # -- タグの設定 --（シンプル化）
+    # 必須タグのみ
+    tags = ["Init", unique_id]  # Init と ID のみ
     
-    if is_boss: tags.append("mob.boss")
+    # Boss判定
+    if is_boss: 
+        tags.append("Boss")
     
-    # サブフォルダがある場合、そのサブフォルダIDもタグとして追加（Dispatcherで識別するため）
+    # サブフォルダがある場合、そのサブフォルダIDもタグとして追加
     if subfolder_id:
-        tags.append(f"mob.{subfolder_id}")
+        tags.append(subfolder_id)
     
-    tags.append(area.capitalize())
-    tags.append(group.capitalize())
-    tags.append(ai.capitalize())
-    
+    # ユーザー指定の追加タグ（スポーンタグから）
     if spawn_tags_raw:
         if 'Tags:[' in spawn_tags_raw:
             spawn_tags_content = spawn_tags_raw.split('Tags:[')[1].split(']')[0]
             extra_tags = [t.strip().strip('"').strip("'") for t in spawn_tags_content.split(',') if t.strip()]
             for tag in extra_tags:
-                # クォートを除去済みのタグと比較
-                if tag.lower() not in [area, group, ai, 'boss']: 
+                # 既存タグと重複しないものを追加
+                if tag.lower() not in ['init', unique_id.lower(), 'boss'] and tag not in tags:
                     tags.append(tag)
         else:
             extra_tags = [t.strip() for t in spawn_tags_raw.split(',') if t.strip()]
             for tag in extra_tags:
-                if tag.lower() not in [area, group, ai, 'boss']: tags.append(tag)
+                if tag.lower() not in ['init', unique_id.lower(), 'boss'] and tag not in tags:
+                    tags.append(tag)
     
     # 友好フラグの処理
     is_friendly = mob_data.get('友好', 'FALSE').strip().upper() == 'TRUE'
@@ -543,8 +609,14 @@ def generate_bank_file(mob_data, index, name_us_to_id):
     else:
         tags.append("ENEMY")
     
-    # SNBTの互換性のため、すべてのタグをダブルクォートで囲む
-    tags_str = ','.join([f'"{t}"' for t in tags])
+    # タグ文字列生成（Initのみクォートなし、他はクォート付き）
+    tags_with_quotes = []
+    for t in tags:
+        if t == "Init":
+            tags_with_quotes.append(t)  # Initはクォートなし
+        else:
+            tags_with_quotes.append(f'"{t}"')
+    tags_str = ','.join(tags_with_quotes)
 
     # -- Bankファイル(register)の中身を作る --
     
@@ -583,9 +655,12 @@ def generate_bank_file(mob_data, index, name_us_to_id):
     mob_type = "Friendly" if is_friendly else "Enemy"
 
     # mcfunction の中身
-    content = f"""# {name_jp} データ登録
+    content = f"""#> {bank_path_str}
+#
+# {name_jp} データ登録
 # ID: {unique_id}
-# {bank_path_str}
+#
+# @within bank:mob/alias/{unique_id.split('.')[0]}/register
 
 # 初期化
 data modify storage bank:mob Base set value {{}}
@@ -1008,6 +1083,21 @@ def main():
             debug_summon = generate_debug_summon_file(primary_row, debug_summon_id, bank.get('bank_path', f"bank:mob/{bank['mob_id']}/register"))
             all_files.append(debug_summon)
             
+            # Alias ファイルを生成 (bank/function/mob/alias/001/register.mcfunction など)
+            alias_files = generate_alias_files(primary_row, bank['mob_id'], bank.get('bank_path', f"bank:mob/{bank['mob_id']}/register"))
+            all_files.extend(alias_files)
+            
+            # Summon ファイルを生成 (bank/function/mob/001.goblin/summon/.mcfunction)
+            # base_entityを取得（primary_rowから）
+            base_entity_raw = primary_row.get('ID', 'zombie').strip()
+            if base_entity_raw and not base_entity_raw.startswith('minecraft:'):
+                base_entity = f"minecraft:{base_entity_raw}"
+            else:
+                base_entity = base_entity_raw if base_entity_raw else 'minecraft:zombie'
+            
+            summon_file = generate_summon_file(primary_row, bank['mob_id'], base_entity)
+            all_files.append(summon_file)
+            
             # Skill files を生成（トリガーがある場合のみ）
             triggers = parse_triggers(primary_row)
             if triggers:
@@ -1026,10 +1116,10 @@ def main():
 
     
     # ファイルを書き込み
-    # Dispatch files (復元)
-    print("[-] Generating dispatch files...")
-    dispatch_files = generate_dispatch_files(bank_info_list)
-    all_files.extend(dispatch_files)
+    # Dispatch files - フラット構造では不要のため無効化
+    # print("[-] Generating dispatch files...")
+    # dispatch_files = generate_dispatch_files(bank_info_list)
+    # all_files.extend(dispatch_files)
     
     # ID Matcher file (New)
     print("[-] Generating matcher file...")
