@@ -65,22 +65,42 @@ SPAWN_DIR = DATAPACK_DIR / "data" / "mob" / "function" / "spawn"
 SPAWN_MAP_DIR = DATAPACK_DIR / "data" / "mob" / "function" / "spawn_map"
 DEBUG_SUMMON_DIR = DATAPACK_DIR / "data" / "debug" / "function" / "summon"
 
+# ローカルCSVファイルのパス (手動ダウンロード用)
+LOCAL_CSV_PATH = SCRIPT_DIR / "mobs.csv"
+
 def fetch_spreadsheet_data():
     """
     【ステップ1】スプレッドシートからデータを取ってくる
-    インターネット経由で Google のサーバーにアクセスし、CSVデータをダウンロードします。
+    
+    1. まずローカルの `mobs.csv` を探します (手動用)
+    2. なければインターネット経由で Google のサーバーにアクセスし、CSVデータをダウンロードします。
     """
+    
+    # 1. ローカルファイルの確認
+    if LOCAL_CSV_PATH.exists():
+        print(f"[-] ローカルファイル ({LOCAL_CSV_PATH.name}) を検出しました。読み込み中...")
+        try:
+             with open(LOCAL_CSV_PATH, 'r', encoding='utf-8') as f:
+                 return f.read()
+        except Exception as e:
+             print(f"[!] ローカルファイルの読み込みに失敗しました: {e}")
+             print("   ネットワーク取得を試みます...")
+
+    # 2. ネットワーク取得
     print(f"[-] スプレッドシートからデータを取得中...")
     print(f"   URL: {CSV_URL}")
     
     try:
-        with urllib.request.urlopen(CSV_URL) as response:
+        # タイムアウト設定を追加 (10秒)
+        with urllib.request.urlopen(CSV_URL, timeout=10) as response:
             data = response.read().decode('utf-8')
             return data
     except Exception as e:
         print(f"[!] エラー: スプレッドシートの取得に失敗しました")
         print(f"   {e}")
-        print(f"\n[?] ヒント: スプレッドシートが「リンクを知っている全員が閲覧可能」に設定されているか確認してください")
+        print(f"\n[?] ヒント: ネットワーク接続を確認するか、ブラウザでスプレッドシートを開いて")
+        print(f"    「ファイル -> ダウンロード -> カンマ区切り形式 (.csv)」で保存し、")
+        print(f"    `{LOCAL_CSV_PATH.name}` という名前でこのフォルダに置いてください。")
         return None
 
 def parse_csv_data(csv_data):
@@ -523,43 +543,26 @@ def generate_bank_file(mob_data, index, name_us_to_id):
     else:
         tags.append("ENEMY")
     
-    # 以前は tags_str = ','.join(tags) でクォートなしだった
-    # SNBTの互換性のため、すべてのタグをダブルクォートで囲むように変更する
+    # SNBTの互換性のため、すべてのタグをダブルクォートで囲む
     tags_str = ','.join([f'"{t}"' for t in tags])
 
     # -- Bankファイル(register)の中身を作る --
     
-    # 見た目の処理
-    appearance_parts = []
+    # 見た目の処理 (CustomName)
     custom_name_clean = '{"text":""}' # デフォルト値
     
     if custom_name_raw:
         custom_name_clean = custom_name_raw.replace('""', '"')
         
         # "CustomName:" というプレフィックスが入っている場合は削除する
-        # 例: CustomName:{"text":"Name"} -> {"text":"Name"}
         if custom_name_clean.startswith("CustomName:"):
              custom_name_clean = custom_name_clean[11:].strip()
              
         # Lv表記 (例: Lv.30, Lv 5) を削除する (動的に付与するため)
-        # JSON文字列の中にある {"text":"Lv.30"} や "text":" Lv.30" などをターゲットにする
         custom_name_clean = re.sub(r'Lv\.?\s*\d+', '', custom_name_clean)
         
-        # 最後に念のため、BaseNameは常にJSON文字列として扱いたいので
-        # もしリスト形式やオブジェクト形式でなくてもそのままにする（ユーザー入力を信頼）
-        # ただし、誤ったクォート処理をしないように注意
-        
-        appearance_parts.append(custom_name_clean)
-    
-    if appearance_parts:
-        appearance = '{' + ','.join(appearance_parts) + '}'
-    else:
-        appearance = '{}'
-
     # 装備 parsing
     armor_items, hand_items = parse_equipment(equipment_raw)
-    armor_str = f"[{','.join(armor_items)}]"
-    hand_str = f"[{','.join(hand_items)}]"
     
     # ステータス
     level = mob_data.get('推定lev', '1').strip()
@@ -576,16 +579,8 @@ def generate_bank_file(mob_data, index, name_us_to_id):
     follow_range = f"{follow_range_raw - 1.0:.4f}"
     kb_resistance = mob_data.get('ノックバック耐性', '0').strip()
     
-    # Spawn Egg の種類を決定
-    # 基本的には {base_entity}_spawn_egg だが、例外もあるので簡易処理
-    # minecraft:zombie -> zombie_spawn_egg
-    base_id_clean = base_entity.replace("minecraft:", "")
-    spawn_egg_id = f"{base_id_clean}_spawn_egg"
-    
-    # 存在しない可能性が高いものや、特殊なものはデフォルト(zombie)または指定のものに
-    # ここでは簡易的に「アーマースタンドやマーカーならゾンビ」にする
-    if base_id_clean in ['armor_stand', 'marker', 'area_effect_cloud', 'item_display']:
-        spawn_egg_id = "zombie_spawn_egg"
+    # Type判定
+    mob_type = "Friendly" if is_friendly else "Enemy"
 
     # mcfunction の中身
     content = f"""# {name_jp} データ登録
@@ -593,46 +588,52 @@ def generate_bank_file(mob_data, index, name_us_to_id):
 # {bank_path_str}
 
 # 初期化
-data modify storage rpg_mob: Instant set value {{}}
+data modify storage bank:mob Base set value {{}}
 
 # Summon用データ
-data modify storage rpg_mob: Instant.Base set value {{id:"{base_entity}",Tags:[{tags_str}]}}
-data modify storage rpg_mob: Instant.Costume set value {{equipment:{{feet:{armor_items[0]},legs:{armor_items[1]},chest:{armor_items[2]},head:{armor_items[3]},mainhand:{hand_items[0]},offhand:{hand_items[1]}}}}}
+data modify storage bank:mob Base.Entity set value {{id:"{base_entity}"}}
+data modify storage bank:mob Base.Tags set value {{Tags:[{tags_str}]}}
+data modify storage bank:mob Costume.Mainhand set value {hand_items[0]}
+data modify storage bank:mob Costume.Offhand set value {hand_items[1]}
+data modify storage bank:mob Costume.Head set value {armor_items[3]}
+data modify storage bank:mob Costume.Chest set value {armor_items[2]}
+data modify storage bank:mob Costume.Legs set value {armor_items[1]}
+data modify storage bank:mob Costume.Feet set value {armor_items[0]}
 
-# 見た目 (CustomName)
-# CustomName は JSON String として BaseNameJSON に保存する (動的レベル表示のため) -> Baseに含まれるTagsやCustomNameは上記のInstant.Baseで設定済み
-# ユーザーの例では CustomName:'...' となっていた。
-data modify storage rpg_mob: Instant.Base.CustomName set value '{custom_name_clean}'
+# CustomName
+data modify storage bank:mob Base.CustomName set value '{custom_name_clean}'
+
+# Type
+data modify storage bank:mob Type set value "{mob_type}"
 
 # 即時ステータス
-data modify storage rpg_mob: Instant.EyePower set value {follow_range}d
-data modify storage rpg_mob: Instant.MovementPower set value {move_speed}d
-data modify storage rpg_mob: Instant.KBResistance set value {kb_resistance}d
-data modify storage rpg_mob: Instant.KBPower set value 0d
+data modify storage bank:mob Status.EyePower set value {follow_range}d
+data modify storage bank:mob Status.MovementPower set value {move_speed}d
+data modify storage bank:mob Status.KBResistance set value {kb_resistance}d
+data modify storage bank:mob Status.KBPower set value 0d
 
-# カスタムステータス (Delay)
-data modify storage rpg_mob: Delay.Status.Level set value {level}
-data modify storage rpg_mob: Delay.Status.HPMax set value {max_hp}f
-data modify storage rpg_mob: Delay.Status.MPMax set value 0
-data modify storage rpg_mob: Delay.Status.ATK set value {attack}
-data modify storage rpg_mob: Delay.Status.DEF set value {defense}
-data modify storage rpg_mob: Delay.Status.SPD set value {speed}
-data modify storage rpg_mob: Delay.Status.GOLD set value {gold}
+# カスタムステータス
+data modify storage bank:mob Status.Level set value {level}
+data modify storage bank:mob Status.HPMax set value {max_hp}f
+data modify storage bank:mob Status.MPMax set value 0
+data modify storage bank:mob Status.ATK set value {attack}
+data modify storage bank:mob Status.DEF set value {defense}
+data modify storage bank:mob Status.SPD set value {speed}
+data modify storage bank:mob Status.GOLD set value {gold}
 
 # Skill ai
-data modify storage rpg_mob: Delay.AI set value {{}}
+data modify storage bank:mob AI set value {{}}
 """
     
     if ai_raw and ai_raw != 'blow' and ai_raw != 'boss':
-         # AIカラムにJSONなどが入っている場合、それを Delay.AI に入れる
-         # ユーザーの要望: AIの感じにskillを入力すればいい -> Delay.AIに設定
+         # AIカラムにJSONなどが入っている場合、それを AI に入れる
          if ai_raw.startswith('{'):
-             content += f"\n# AI (Custom)\ndata modify storage rpg_mob: Delay.AI set value {ai_raw}\n"
+             content += f"\n# AI (Custom)\ndata modify storage bank:mob AI set value {ai_raw}\n"
          else:
              content += f"\n# AI (Type)\n# Type: {ai_raw}\n"
     
     if is_boss:
-        content += "\n# ボスフラグ\ndata modify storage rpg_mob: Instant.Base.Tags append value \"Boss\"\n"
+        content += "\n# ボスフラグ\ndata modify storage bank:mob Base.Tags.Tags append value \"Boss\"\n"
     
     bank_file = {
         'path': file_path,
