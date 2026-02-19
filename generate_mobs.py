@@ -394,7 +394,7 @@ def generate_skill_files(mob_data, unique_id, area, group, ai, triggers, subfold
         if skill_json:
             content += f"# Skill: {skill_json}\n\n"
             content += f"# スキルデータをストレージに保存\n"
-            content += f"data modify storage rpg_skill: data set value {skill_json}\n\n"
+            content += f"data modify storage skill: data set value {skill_json}\n\n"
             content += f"# スキル実行\n"
             content += f"function skill:execute\n"
         else:
@@ -452,7 +452,7 @@ execute if score @s Interval matches ..0 run function {func_base}/turn_distribut
                     # Skill
                     skill_json = t_data.get('skill')
                     if skill_json and skill_json.strip():
-                        turn_file_content += f"{prefix}data modify storage rpg_skill: data set value {skill_json}\n"
+                        turn_file_content += f"{prefix}data modify storage skill: data set value {skill_json}\n"
                         turn_file_content += f"{prefix}function skill:execute\n"
                     
                     # MP Cost
