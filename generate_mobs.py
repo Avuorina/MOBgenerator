@@ -68,40 +68,92 @@ DEBUG_SUMMON_DIR = DATAPACK_DIR / "data" / "debug" / "function" / "summon"
 # ローカルCSVファイルのパス (手動ダウンロード用)
 LOCAL_CSV_PATH = SCRIPT_DIR / "mobs.csv"
 
+# ローカルCSVを優先するか？ False にするとスプレッドシートから直接ダウンロード
+USE_LOCAL_CSV = True
+
 def fetch_spreadsheet_data():
     """
     【ステップ1】スプレッドシートからデータを取ってくる
     
-    1. まずローカルの `mobs.csv` を探します (手動用)
-    2. なければインターネット経由で Google のサーバーにアクセスし、CSVデータをダウンロードします。
+    優先順位:
+    1. USE_LOCAL_CSV=True のときはローカルの mobs.csv を使用
+    2. ネットワーク取得を試みる（失敗した場合は 3 へ）
+    3. ネットワーク失敗時はローカルの mobs.csv に自動フォールバック
     """
     
-    # 1. ローカルファイルの確認
-    if LOCAL_CSV_PATH.exists():
-        print(f"[-] ローカルファイル ({LOCAL_CSV_PATH.name}) を検出しました。読み込み中...")
+    # 1. ローカルファイルの確認 (USE_LOCAL_CSV=True のときのみ)
+    if USE_LOCAL_CSV and LOCAL_CSV_PATH.exists():
+        print(f"[-] ローカルファイル ({LOCAL_CSV_PATH.name}) を使用します。読み込み中...")
         try:
              with open(LOCAL_CSV_PATH, 'r', encoding='utf-8') as f:
                  return f.read()
         except Exception as e:
              print(f"[!] ローカルファイルの読み込みに失敗しました: {e}")
              print("   ネットワーク取得を試みます...")
+    elif not USE_LOCAL_CSV:
+        print(f"[-] スプレッドシートから直接ダウンロードします...")
 
     # 2. ネットワーク取得
     print(f"[-] スプレッドシートからデータを取得中...")
     print(f"   URL: {CSV_URL}")
     
+    network_data = None
+
+    # まず requests ライブラリを試す (システムプロキシ + SSL検証なし)
     try:
-        # タイムアウト設定を追加 (10秒)
-        with urllib.request.urlopen(CSV_URL, timeout=10) as response:
-            data = response.read().decode('utf-8')
-            return data
+        import requests
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        print("   [requests] 接続中...")
+        response = requests.get(CSV_URL, timeout=15, verify=False)
+        response.raise_for_status()
+        network_data = response.text
+    except ImportError:
+        pass  # ライブラリなし → urllib へ
     except Exception as e:
-        print(f"[!] エラー: スプレッドシートの取得に失敗しました")
-        print(f"   {e}")
-        print(f"\n[?] ヒント: ネットワーク接続を確認するか、ブラウザでスプレッドシートを開いて")
-        print(f"    「ファイル -> ダウンロード -> カンマ区切り形式 (.csv)」で保存し、")
-        print(f"    `{LOCAL_CSV_PATH.name}` という名前でこのフォルダに置いてください。")
-        return None
+        print(f"   [requests] 失敗: {type(e).__name__}")
+    
+    # urllib フォールバック (Windowsシステムプロキシ + SSL検証を無効化)
+    if network_data is None:
+        try:
+            import ssl
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            proxy_handler = urllib.request.ProxyHandler(urllib.request.getproxies())
+            opener = urllib.request.build_opener(proxy_handler)
+            print("   [urllib] 接続中...")
+            req = urllib.request.Request(CSV_URL, headers={'User-Agent': 'Mozilla/5.0'})
+            with opener.open(req, timeout=15) as response:
+                network_data = response.read().decode('utf-8')
+        except Exception as e:
+            print(f"   [urllib] 失敗: {type(e).__name__}")
+
+    if network_data is not None:
+        print("   [OK] スプレッドシートの取得に成功しました！")
+        return network_data
+
+    # 3. ネットワーク失敗時 → ローカルCSVへ自動フォールバック
+    print(f"\n[!] ネットワーク取得に失敗しました。ローカルCSV ({LOCAL_CSV_PATH.name}) を確認中...")
+    if LOCAL_CSV_PATH.exists():
+        try:
+            with open(LOCAL_CSV_PATH, 'r', encoding='utf-8') as f:
+                data = f.read()
+            print(f"   [OK] {LOCAL_CSV_PATH.name} を使用します。")
+            return data
+        except Exception as e:
+            print(f"   [!] ローカルファイルの読み込みも失敗しました: {e}")
+    else:
+        print(f"   [!] {LOCAL_CSV_PATH.name} が見つかりません。")
+        print(f"\n[?] 以下の手順で mobs.csv を用意してください:")
+        print(f"    1. ブラウザで下記URLを開く")
+        print(f"       {CSV_URL}")
+        print(f"    2. 自動でダウンロードされたCSVを")
+        print(f"       {LOCAL_CSV_PATH}")
+        print(f"       にリネームして保存")
+    return None
+
+
 
 def parse_csv_data(csv_data):
     """
@@ -234,7 +286,8 @@ def generate_spawn_wrapper_file(mob_data, unique_id, bank_path_str):
     name_jp = mob_data.get('NameJP', 'Unknown')
     
     # 新しい方式: Bank(Storage Load) -> Generic Spawn
-    content = f"""# {name_jp}を召喚（ラッパー）
+    content = f"""#> mob:spawn/{unique_id}
+# {name_jp}を召喚（ラッパー）
 # ID: {unique_id}
 # 使用方法: /function mob:spawn/{unique_id}
 
@@ -390,7 +443,9 @@ def generate_skill_files(mob_data, unique_id, area, group, ai, triggers, subfold
         file_path = base_path / filename
         
         # JSONデータをそのまま使用
-        content = f"# {name_jp} - {trigger_type} トリガー\n"
+        content = f"#> {func_base}/{trigger_type}\n"
+        content += f"# {name_jp} - {trigger_type} トリガー\n"
+        content += f"# @within {func_base}/\n"
         if skill_json:
             content += f"# Skill: {skill_json}\n\n"
             content += f"# スキルデータをストレージに保存\n"
@@ -399,18 +454,24 @@ def generate_skill_files(mob_data, unique_id, area, group, ai, triggers, subfold
             content += f"function skill:execute\n"
         else:
             content += "# このトリガーに特定のスキルはありません（ターン設定のみ）\n"
-        # initの場合、Turn設定を追加（files.appendの前に行う）
+        # initトリガーの場合、Turn設定を追加
+        has_init_content = bool(skill_json)  # スキルあり？
         if trigger_type == 'init':
             turn_data_list = mob_data.get('TURN_DATA_LIST', [])
             if turn_data_list:
+                has_init_content = True  # ターンデータあり
                 first_interval = turn_data_list[0].get('interval') or '60'
                 content += f"\n# ターン制システムのセットアップ\nscoreboard players set @s Turn 1\nscoreboard players set @s Interval {first_interval}\n"
 
-        files.append({
-            'path': file_path,
-            'content': content,
-            'name': f"{name_jp} ({trigger_type})"
-        })
+        # initの場合、スキルまたはターンデータがあるときのみ生成
+        if trigger_type == 'init' and not has_init_content:
+            pass  # init.mcfunction を生成しない
+        else:
+            files.append({
+                'path': file_path,
+                'content': content,
+                'name': f"{name_jp} ({trigger_type})"
+            })
 
         # initの場合、Tick実行用ファイル(.mcfunction)も生成済み
         if trigger_type == 'init':
@@ -428,14 +489,18 @@ scoreboard players remove @s Interval 1
 execute if score @s Interval matches ..0 run function {func_base}/turn_distributor
 """
                 # 3. Turn Distributor & Individual Turn Files
-                dist_content = f"# {name_jp} のターン振り分け\n"
+                dist_content = f"#> {func_base}/turn_distributor\n"
+                dist_content += f"# {name_jp} のターン振り分け\n"
+                dist_content += f"# @within {func_base}/\n"
                 
                 for i, t_data in enumerate(turn_data_list):
                     turn_num = i + 1
                     dist_content += f"execute if score @s Turn matches {turn_num} run return run function {func_base}/turn/turn_{turn_num}\n"
                     
                     # Generate turn_{n}.mcfunction
-                    turn_file_content = f"# ターン {turn_num} のアクション\n"
+                    turn_file_content = f"#> {func_base}/turn/turn_{turn_num}\n"
+                    turn_file_content += f"# ターン {turn_num} のアクション\n"
+                    turn_file_content += f"# @within {func_base}/turn_distributor\n"
                     
                     # Probability Check
                     prob_str = t_data.get('prob', '').strip().replace('%', '')
@@ -484,10 +549,17 @@ execute if score @s Interval matches ..0 run function {func_base}/turn_distribut
                     'name': f"{name_jp} (Turn Distributor)"
                 })
 
-            tick_content = f"""# {name_jp} - Tick Function
+            # has_init_content に応じてTickの初期化呼び出しを切り替え
+            if has_init_content:
+                init_call = f"execute if entity @s[tag=Init] run function {func_base}/init\n"
+            else:
+                init_call = ""
+
+            tick_content = f"""#> {func_base}/
+# {name_jp} - Tick Function
+# @within mob_manager:tick (execute as @e[tag={unique_id}])
 # 初期化チェック
-execute if entity @s[tag=Init] run function {func_base}/init
-execute if entity @s[tag=Init] run tag @s remove Init
+{init_call}execute if entity @s[tag=Init] run tag @s remove Init
 
 {turn_logic}
 # ここにインターバル/ターン制スキルを追加可能
@@ -1121,10 +1193,10 @@ def main():
     # dispatch_files = generate_dispatch_files(bank_info_list)
     # all_files.extend(dispatch_files)
     
-    # ID Matcher file (New)
-    print("[-] Generating matcher file...")
-    matcher_file = generate_dispatcher_file(bank_info_list)
-    all_files.append(matcher_file)
+    # ID Matcher file (match_id.mcfunction) - 生成を無効化
+    # print("[-] Generating matcher file...")
+    # matcher_file = generate_dispatcher_file(bank_info_list)
+    # all_files.append(matcher_file)
     
     write_files(all_files)
     
