@@ -64,12 +64,13 @@ BANK_DIR = DATAPACK_DIR / "data" / "bank" / "function" / "mob"
 SPAWN_DIR = DATAPACK_DIR / "data" / "mob" / "function" / "spawn"
 SPAWN_MAP_DIR = DATAPACK_DIR / "data" / "mob" / "function" / "spawn_map"
 DEBUG_SUMMON_DIR = DATAPACK_DIR / "data" / "debug" / "function" / "summon"
+BANK_MANAGER_DIR = DATAPACK_DIR / "data" / "bank_manager" / "function"
 
 # ローカルCSVファイルのパス (手動ダウンロード用)
 LOCAL_CSV_PATH = SCRIPT_DIR / "mobs.csv"
 
 # ローカルCSVを優先するか？ False にするとスプレッドシートから直接ダウンロード
-USE_LOCAL_CSV = True
+USE_LOCAL_CSV = False
 
 def fetch_spreadsheet_data():
     """
@@ -131,6 +132,13 @@ def fetch_spreadsheet_data():
 
     if network_data is not None:
         print("   [OK] スプレッドシートの取得に成功しました！")
+        # デバッグ用に保存
+        try:
+            with open(LOCAL_CSV_PATH, 'w', encoding='utf-8') as f:
+                f.write(network_data)
+            print(f"   [+] データ確認用に {LOCAL_CSV_PATH.name} に保存しました。")
+        except Exception as e:
+            print(f"   [!] 保存に失敗: {e}")
         return network_data
 
     # 3. ネットワーク失敗時 → ローカルCSVへ自動フォールバック
@@ -343,8 +351,20 @@ def generate_summon_file(mob_data, unique_id, base_entity):
 # @within bank:mob/alias/{unique_id.split('.')[0]}/summon
 
 # エンティティ召喚
-summon {base_entity.replace('minecraft:', '')} ~ ~ ~ {{Tags:[Init]}}
 """
+    # トリガーの有無でタグを付与
+    tags = ["Init", "BankInit"]
+    if mob_data.get('初期', '').strip() or mob_data.get('TURN_DATA_LIST', []):
+        tags.append("HasTick")
+    if mob_data.get('死', '').strip():
+        tags.append("HasDeath")
+    if mob_data.get('ダメージ', '').strip():
+        tags.append("HasHurt")
+    if mob_data.get('攻撃', '').strip():
+        tags.append("HasAttack")
+
+    tags_str = ",".join(tags)
+    content += f"summon {base_entity.replace('minecraft:', '')} ~ ~ ~ {{Tags:[{tags_str}]}}\n"
     
     return {
         'path': summon_dir / ".mcfunction",
@@ -389,6 +409,62 @@ function bank:mob/{unique_id}/summon/
         'name': f"{name_jp} (Alias Summon)"
     })
     
+    # 3. 各種イベント用 (tick, hurt, death, attack)
+    # 実際の処理を持つ (bank:mob/{unique_id}/...) へルーティング
+    
+    # tick (TURN/Interval処理用)
+    has_tick = mob_data.get('初期', '').strip() or mob_data.get('TURN_DATA_LIST', [])
+    if has_tick:
+        tick_content = f"""#> bank:mob/alias/{numeric_id}/tick
+# @within bank_manager:mob/trigger/macro/tick
+
+function bank:mob/{unique_id}/
+"""
+        files.append({
+            'path': alias_dir / "tick.mcfunction",
+            'content': tick_content,
+            'name': f"{name_jp} (Alias Tick)"
+        })
+
+    # hurt
+    if mob_data.get('ダメージ', '').strip():
+        hurt_content = f"""#> bank:mob/alias/{numeric_id}/hurt
+# @within bank_manager:mob/trigger/macro/hurt
+
+function bank:mob/{unique_id}/on_hurt
+"""
+        files.append({
+            'path': alias_dir / "hurt.mcfunction",
+            'content': hurt_content,
+            'name': f"{name_jp} (Alias Hurt)"
+        })
+
+    # death
+    if mob_data.get('死', '').strip():
+        death_content = f"""#> bank:mob/alias/{numeric_id}/death
+# @within bank_manager:mob/trigger/macro/death
+
+function bank:mob/{unique_id}/death
+"""
+        files.append({
+            'path': alias_dir / "death.mcfunction",
+            'content': death_content,
+            'name': f"{name_jp} (Alias Death)"
+        })
+
+    # attack
+    if mob_data.get('攻撃', '').strip():
+        attack_content = f"""#> bank:mob/alias/{numeric_id}/attack
+# @within bank_manager:mob/trigger/macro/attack
+
+function bank:mob/{unique_id}/on_attack
+"""
+        files.append({
+            'path': alias_dir / "attack.mcfunction",
+            'content': attack_content,
+            'name': f"{name_jp} (Alias Attack)"
+        })
+    
     return files
 
 
@@ -399,7 +475,7 @@ def parse_triggers(mob_data):
     """
     triggers = {}
     
-    # トリガー列のマッピング
+    # トリガー列のマッピング (これらのイベントは常に呼ばれる可能性があるため、空でも生成対象にする)
     trigger_columns = {
         '初期': 'init',
         '死': 'death',
@@ -411,7 +487,7 @@ def parse_triggers(mob_data):
         skill_id = mob_data.get(col_name, '').strip()
         if skill_id:
             triggers[trigger_type] = skill_id
-    
+            
     # initトリガーは常に必要（Tick関数生成のため）
     # Initタグの処理を行う .mcfunction (Tick) はここで生成されるため、
     # スキルやターン設定がなくても必ず生成する必要がある。
@@ -446,14 +522,21 @@ def generate_skill_files(mob_data, unique_id, area, group, ai, triggers, subfold
         content = f"#> {func_base}/{trigger_type}\n"
         content += f"# {name_jp} - {trigger_type} トリガー\n"
         content += f"# @within {func_base}/\n"
+        
+        # deathイベントの場合は、必ずキル処理基盤を呼ぶ
+        if trigger_type == 'death':
+            content += f"\n# 死亡時共通処理 (HPバー削除、アイテムドロップ等)\n"
+            content += f"function bank_manager:mob/death/\n\n"
+            
         if skill_json:
-            content += f"# Skill: {skill_json}\n\n"
+            content += f"# Skill: {skill_json}\n"
             content += f"# スキルデータをストレージに保存\n"
-            content += f"data modify storage skill: data set value {skill_json}\n\n"
+            content += f"data modify storage skill: data set value {skill_json}\n"
             content += f"# スキル実行\n"
             content += f"function skill:execute\n"
         else:
-            content += "# このトリガーに特定のスキルはありません（ターン設定のみ）\n"
+            content += "# 特定のスキルはありません\n"
+            
         # initトリガーの場合、Turn設定を追加
         has_init_content = bool(skill_json)  # スキルあり？
         if trigger_type == 'init':
@@ -463,7 +546,8 @@ def generate_skill_files(mob_data, unique_id, area, group, ai, triggers, subfold
                 first_interval = turn_data_list[0].get('interval') or '60'
                 content += f"\n# ターン制システムのセットアップ\nscoreboard players set @s Turn 1\nscoreboard players set @s Interval {first_interval}\n"
 
-        # initの場合、スキルまたはターンデータがあるときのみ生成
+        # 生成
+        # initの場合、スキルまたはターンデータがあるときのみ生成 (death/hurt等は存在する場合のみここに来る)
         if trigger_type == 'init' and not has_init_content:
             pass  # init.mcfunction を生成しない
         else:
@@ -517,6 +601,11 @@ execute if score @s Interval matches ..0 run function {func_base}/turn_distribut
                     # Skill
                     skill_json = t_data.get('skill')
                     if skill_json and skill_json.strip():
+                        import re
+                        # MobIDが "008.henchman" などの場合、数字部分だけ("8"等、前ゼロなし)を抽出する
+                        def _repl(m):
+                            return f'MobID:"{int(m.group(1))}"'
+                        skill_json = re.sub(r'MobID:"(\d+)[^"]*"', _repl, skill_json)
                         turn_file_content += f"{prefix}data modify storage skill: data set value {skill_json}\n"
                         turn_file_content += f"{prefix}function skill:execute\n"
                     
@@ -609,7 +698,7 @@ def generate_bank_file(mob_data, index, name_us_to_id):
     
     # NameUSが初出なら新規ID、既出なら既存IDを使用
     if name_us not in name_us_to_id:
-        name_us_to_id[name_us] = f"{index:03d}.{simple_id}"
+        name_us_to_id[name_us] = f"{index}.{simple_id}"
     unique_id = name_us_to_id[name_us]
     
     # サブフォルダ処理
@@ -621,7 +710,7 @@ def generate_bank_file(mob_data, index, name_us_to_id):
             subfolder_id = subfolder_snake
         else:
             # Main以外は連番を付ける
-            subfolder_id = f"{index:03d}.{subfolder_snake}"
+            subfolder_id = f"{index}.{subfolder_snake}"
     else:
         subfolder_id = None
     
@@ -654,6 +743,16 @@ def generate_bank_file(mob_data, index, name_us_to_id):
     # Boss判定
     if is_boss: 
         tags.append("Boss")
+        
+    # トリガーの有無で付与する機能タグ
+    if mob_data.get('初期', '').strip() or mob_data.get('TURN_DATA_LIST', []):
+        tags.append("HasTick")
+    if mob_data.get('死', '').strip():
+        tags.append("HasDeath")
+    if mob_data.get('ダメージ', '').strip():
+        tags.append("HasHurt")
+    if mob_data.get('攻撃', '').strip():
+        tags.append("HasAttack")
     
     # サブフォルダがある場合、そのサブフォルダIDもタグとして追加
     if subfolder_id:
@@ -1199,7 +1298,12 @@ def main():
     # all_files.append(matcher_file)
     
     write_files(all_files)
-    
+
+    # bank_manager:mob/tick/dispatch/.mcfunction を自動生成
+    # (マクロ移行に伴い、この静的ディスパッチファイルはもう生成しない)
+    # print(f"[-] bank_manager:mob/tick/dispatch を生成中...")
+    # -- 削除済み --
+
     # IDリストファイル生成
     id_list_path = SCRIPT_DIR / "id_list_updates.txt"
     print(f"\n[-] IDリストを生成中: {id_list_path}")
