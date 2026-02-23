@@ -86,11 +86,11 @@ def fetch_spreadsheet_data():
     if USE_LOCAL_CSV and LOCAL_CSV_PATH.exists():
         print(f"[-] ローカルファイル ({LOCAL_CSV_PATH.name}) を使用します。読み込み中...")
         try:
-             with open(LOCAL_CSV_PATH, 'r', encoding='utf-8') as f:
-                 return f.read()
+            with open(LOCAL_CSV_PATH, 'r', encoding='utf-8') as f:
+                return f.read()
         except Exception as e:
-             print(f"[!] ローカルファイルの読み込みに失敗しました: {e}")
-             print("   ネットワーク取得を試みます...")
+            print(f"[!] ローカルファイルの読み込みに失敗しました: {e}")
+            print("   ネットワーク取得を試みます...")
     elif not USE_LOCAL_CSV:
         print(f"[-] スプレッドシートから直接ダウンロードします...")
 
@@ -170,10 +170,6 @@ def parse_csv_data(csv_data):
     名前が空欄の行はスキップします。
     """
     reader = csv.DictReader(csv_data.splitlines())
-    mobs = []
-    
-    rows = []
-    last_valid_row = None
     
     rows = []
     last_valid_row = None
@@ -590,13 +586,13 @@ execute if score @s Interval matches ..0 run function {func_base}/turn_distribut
                     prob_str = t_data.get('prob', '').strip().replace('%', '')
                     prob_val = 100
                     if prob_str and prob_str.isdigit():
-                         prob_val = int(prob_str)
+                        prob_val = int(prob_str)
                     
                     prefix = ""
                     if prob_val < 100:
                         turn_file_content += f"# 発動確率: {prob_val}%\n"
                         turn_file_content += f"function lib:calc/random100\n"
-                        prefix = f"execute if score $random _ matches ..{prob_val - 1} run "
+                        prefix = f"execute if score @s Random matches ..{prob_val - 1} run "
 
                     # Skill
                     skill_json = t_data.get('skill')
@@ -658,9 +654,6 @@ execute if score @s Interval matches ..0 run function {func_base}/turn_distribut
                 'content': tick_content,
                 'name': f"{name_jp} (Tick/InitWrapper)"
             })
-
-    return files
-
 
     return files
 

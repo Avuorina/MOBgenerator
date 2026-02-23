@@ -31,8 +31,7 @@ IDX_CMD = 0
 IDX_NAME_JP = 1
 IDX_NAME_US = 2
 IDX_LORE = 3
-IDX_BASE = 4
-IDX_TYPE = 5
+IDX_TYPE = 4
 IDX_ATK_DMG = 5
 IDX_ATK_SPD = 6
 
@@ -261,35 +260,56 @@ def generate_loot_table_file(row, index):
     reach_map = {
         "sword": 3.0,
         "axe": 2.5,
-        "spear": 7.5
+        "spear": 7.5,
+        "bow": 20.0
     }
     reach_val = reach_map.get(weapon_type, 2.0)
     
+    # 武器種とリーチの表示 (RPGっぽく)
+    if is_weapon:
+        weapon_name_map = {
+            "sword": "剣",
+            "axe": "斧",
+            "spear": "槍",
+            "bow": "弓"
+        }
+        w_name = weapon_name_map.get(weapon_type, "不明")
+        final_lore.append([
+            "",
+            {"text": f"◆ 武器種 : ", "color": "gray", "italic": False},
+            {"text": w_name, "color": "gold", "italic": False}
+        ])
+        final_lore.append([
+            "",
+            {"text": "◆ 攻撃範囲 : ", "color": "gray", "italic": False},
+            {"text": f"{reach_val:.1f}", "color": "white", "italic": False}
+        ])
+        final_lore.append([""]) # Spacer
+
     # 攻撃力 & 攻撃速度
     if atk_val > 0:
         final_lore.append([
             "",
-            {"text": "__U_E005__ ", "color": "white", "italic": False},
+            {"text": "__U_E005__ 攻撃力 : ", "color": "gray", "italic": False},
             {"text": f"{atk_val:.1f}", "color": "red", "italic": False}
         ])
     
     if spd_val > 0:
         final_lore.append([
             "",
-            {"text": "__U_E00B__ ", "color": "white", "italic": False},
+            {"text": "__U_E00B__ 攻撃速度 : ", "color": "gray", "italic": False},
             {"text": f"{spd_val:.1f}", "color": "blue", "italic": False}
         ])
         
     # ボーナスステータス
-    # フォーマット: {"HP": {"color": "red", "label": "__U_E001__"}, ...}
     stat_display_config = {
-        "HP": {"color": "red", "label": "__U_E001__"},
-        "MP": {"color": "aqua", "label": "__U_E003__"},
-        "STR": {"color": "dark_red", "label": "__U_E007__"},
-        "DEF": {"color": "blue", "label": "__U_E006__"},
-        "INT": {"color": "light_purple", "label": "__U_E008__"},
-        "AGI": {"color": "green", "label": "__U_E009__"},
-        "LUCK": {"color": "yellow", "label": "__U_E00A__"}
+        "HP": {"color": "red", "label": "__U_E001__ HP"},
+        "MP": {"color": "aqua", "label": "__U_E003__ MP"},
+        "STR": {"color": "dark_red", "label": "__U_E007__ STR"},
+        "DEF": {"color": "blue", "label": "__U_E006__ DEF"},
+        "INT": {"color": "light_purple", "label": "__U_E008__ INT"},
+        "AGI": {"color": "green", "label": "__U_E009__ AGI"},
+        "LUCK": {"color": "yellow", "label": "__U_E00A__ LUCK"}
     }
     
     for stat_key, stat_val in custom_stats.items():
@@ -298,7 +318,7 @@ def generate_loot_table_file(row, index):
             sign = "+" if stat_val > 0 else ""
             final_lore.append([
                 "",
-                {"text": f"{conf['label']} ", "color": "white", "italic": False},
+                {"text": f"{conf['label']} : ", "color": "gray", "italic": False},
                 {"text": f"{sign}{stat_val:.1f}", "color": conf["color"], "italic": False}
             ])
 
