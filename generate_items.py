@@ -30,18 +30,19 @@ ITEM_LOOT_DIR = DATAPACK_DIR / "data" / "bank" / "loot_table" / "item"
 IDX_CMD = 0
 IDX_NAME_JP = 1
 IDX_NAME_US = 2
-IDX_LORE = 3
-IDX_TYPE = 4
-IDX_ATK_DMG = 5
-IDX_ATK_SPD = 6
+IDX_BASE = 3
+IDX_LORE = 4
+IDX_TYPE = 5
+IDX_ATK_DMG = 6
+IDX_ATK_SPD = 7
 
-IDX_BONUS_HP = 7
-IDX_BONUS_MP = 8
-IDX_BONUS_STR = 9
-IDX_BONUS_DEF = 10
-IDX_BONUS_INT = 11
-IDX_BONUS_AGI = 12
-IDX_BONUS_LUCK = 13
+IDX_BONUS_HP = 8
+IDX_BONUS_MP = 9
+IDX_BONUS_STR = 10
+IDX_BONUS_DEF = 11
+IDX_BONUS_INT = 12
+IDX_BONUS_AGI = 13
+IDX_BONUS_LUCK = 14
 
 def fetch_spreadsheet_data():
     print(f"[-] スプレッドシートからデータを取得中...")
@@ -341,6 +342,15 @@ def generate_loot_table_file(row, index):
     
     # 5. Attributes 設定 - 削除済み
 
+    # 武器種指定の有無でベースアイテムを切り替え
+    if is_weapon:
+        base_item_id = "minecraft:carrot_on_a_stick"
+    else:
+        base_item_raw = get_col(IDX_BASE).strip()
+        if not base_item_raw:
+            base_item_raw = "stick" # 万が一のフォールバック
+        base_item_id = base_item_raw if ":" in base_item_raw else f"minecraft:{base_item_raw}"
+
     loot_table = {
         "pools": [
             {
@@ -348,7 +358,7 @@ def generate_loot_table_file(row, index):
                 "entries": [
                     {
                         "type": "minecraft:item",
-                        "name": "minecraft:carrot_on_a_stick", # ベースアイテム固定
+                        "name": base_item_id,
                         "functions": function_list
                     }
                 ]
