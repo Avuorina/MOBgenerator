@@ -14,6 +14,18 @@ import urllib.request
 from pathlib import Path
 import re
 import json
+import sys
+import os
+
+# Windowsのコンソールなどで絵文字や日本語の文字化けを防ぐ設定
+if os.name == 'nt':
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+    except Exception:
+        pass
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
 
 # ==========================================
 # 設定エリア
@@ -45,13 +57,13 @@ IDX_BONUS_AGI = 13
 IDX_BONUS_LUCK = 14
 
 def fetch_spreadsheet_data():
-    print(f"[-] スプレッドシートからデータを取得中...")
+    print(f"📥 スプレッドシートからデータを取得中...")
     try:
         with urllib.request.urlopen(CSV_URL) as response:
             data = response.read().decode('utf-8')
             return data
     except Exception as e:
-        print(f"[!] エラー: {e}")
+        print(f"🔴 エラー: {e}")
         return None
 
 def snake_case(text):
@@ -154,16 +166,13 @@ def generate_loot_table_file(row, index):
     if cmd_raw:
         try:
             cmd = int(cmd_raw)
-            idx_str = f"{cmd:03d}"
         except:
             cmd = index
-            idx_str = f"{index:03d}"
     else:
         cmd = index
-        idx_str = f"{index:03d}"
 
     simple_id = snake_case(name_us)
-    unique_id = f"{idx_str}.{simple_id}"
+    unique_id = f"{index}.{simple_id}"
     
     # Attributes - REMOVED for Custom System
     # modifiers are no longer used in set_attributes
@@ -257,36 +266,6 @@ def generate_loot_table_file(row, index):
         final_lore.append([""]) # Spacer
         
     # Stats Display
-    # リーチ(攻撃範囲)のマッピング
-    reach_map = {
-        "sword": 3.0,
-        "axe": 2.5,
-        "spear": 7.5,
-        "bow": 20.0
-    }
-    reach_val = reach_map.get(weapon_type, 2.0)
-    
-    # 武器種とリーチの表示 (RPGっぽく)
-    if is_weapon:
-        weapon_name_map = {
-            "sword": "剣",
-            "axe": "斧",
-            "spear": "槍",
-            "bow": "弓"
-        }
-        w_name = weapon_name_map.get(weapon_type, "不明")
-        final_lore.append([
-            "",
-            {"text": f"◆ 武器種 : ", "color": "gray", "italic": False},
-            {"text": w_name, "color": "gold", "italic": False}
-        ])
-        final_lore.append([
-            "",
-            {"text": "◆ 攻撃範囲 : ", "color": "gray", "italic": False},
-            {"text": f"{reach_val:.1f}", "color": "white", "italic": False}
-        ])
-        final_lore.append([""]) # Spacer
-
     # 攻撃力 & 攻撃速度
     if atk_val > 0:
         final_lore.append([
@@ -378,21 +357,29 @@ def generate_loot_table_file(row, index):
         
     content = re.sub(r"__U_([0-9A-F]{4})__", replace_unicode_placeholder, content)
     
-    file_path = ITEM_LOOT_DIR / f"{unique_id}.json"
+    # 出力先ディレクトリの決定
+    if is_weapon:
+        # 武器種名の複数形をディレクトリ名にする (例: sword -> swords)
+        dir_name = f"{weapon_type}s"
+        sub_dir = f"weapons/{dir_name}"
+    else:
+        sub_dir = "others"
+        
+    file_path = ITEM_LOOT_DIR / sub_dir / f"{unique_id}.json"
     
     return {'path': file_path, 'content': content, 'name': name_jp}
 
 def write_files(files):
     if not files: return
-    print(f"\n[-] {len(files)} 個のファイルを生成中...")
+    print(f"\n📦 {len(files)} 個のアイテムファイル（Loot Table）を生成中...")
     for f in files:
         f['path'].parent.mkdir(parents=True, exist_ok=True)
         with open(f['path'], 'w', encoding='utf-8') as file:
             file.write(f['content'])
-    print(f"\n[OK] 完了！ output: {ITEM_LOOT_DIR}")
+    print(f"\n🎉 完了！ output: {ITEM_LOOT_DIR}")
 
 def main():
-    print("Minecraft RPG - Item Generator (v8 Functions)")
+    print("✨ Minecraft RPG - Item Generator (v8 Functions) ✨")
     csv_data = fetch_spreadsheet_data()
     if not csv_data: return
     
@@ -400,10 +387,11 @@ def main():
     rows = list(reader)
     
     if len(rows) < 3:
-        print("エラー: 3行以上必要です")
+        print("❌ エラー: スプレッドシートには3行以上のデータが必要です")
         return
         
-    print(f"[-] {len(rows)} 行読み込み")
+    print(f"✅ {len(rows)} 行読み込み完了")
+    print(f"🚀 アイテム生成処理を開始します...\n")
     
     files = []
     for idx, row in enumerate(rows[2:], 1):
@@ -411,7 +399,7 @@ def main():
             f_obj = generate_loot_table_file(row, idx)
             if f_obj:
                 files.append(f_obj)
-                print(f"   [OK] {f_obj['name']}")
+                print(f"   🪄 {f_obj['name']} を生成しました")
             
     write_files(files)
 
